@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "id": "io.github.gustavonline.local-ai",
-  "name": "Local AI",
-  "version": "0.3.0",
+  "name": "llama.cpp Local AI",
+  "version": "0.4.0",
   "author": "Gustav Andersen",
   "license": "MIT",
   "description": "Start, stop, switch, and inspect prepared llama.cpp profiles from the Omarchy bar.",
@@ -12,7 +12,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Local AI",
+    "displayName": "llama.cpp Local AI",
     "description": "Control prepared llama.cpp systemd user services without opening a terminal.",
     "category": "AI",
     "aliases": ["local-ai", "llama.cpp", "models", "runtime"],

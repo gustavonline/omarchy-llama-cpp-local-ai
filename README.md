@@ -1,4 +1,4 @@
-# Local AI for Omarchy
+# llama.cpp Local AI for Omarchy
 
 An Omarchy bar widget for starting and switching **prepared llama.cpp server
 profiles** without opening a terminal.

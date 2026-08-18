@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Rename the user-facing plugin to llama.cpp Local AI while retaining its
+  stable plugin ID and configuration paths.
+
 ## 0.3.0
 
 - Discover model, quantization, context, accelerator, and endpoint directly

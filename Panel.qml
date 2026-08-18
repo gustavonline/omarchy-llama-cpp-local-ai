@@ -163,7 +163,7 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: "󰍛"
-    tooltipText: "Local AI"
+    tooltipText: "llama.cpp Local AI"
     active: root.running
     useActiveColor: false
 
@@ -222,7 +222,7 @@ Panel {
 
           PanelHero {
             width: parent.width
-            title: "Local AI"
+            title: "llama.cpp Local AI"
             meta: String(root.status.backend || "LOCAL RUNTIME").toUpperCase()
             foreground: root.foreground
             fontFamily: root.fontFamily
