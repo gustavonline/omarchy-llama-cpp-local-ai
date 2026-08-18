@@ -1,29 +1,75 @@
 # Local AI for Omarchy
 
-A standalone Omarchy bar widget for controlling local AI runtimes without a
-terminal. It does not clone, replace, or depend on Omarchy's built-in Agents
-widget.
+An Omarchy bar widget for starting and switching **prepared llama.cpp server
+profiles** without opening a terminal.
 
-The panel discovers profiles from the commented and user-editable
-`~/.config/omarchy/local-ai.toml`, displays
-installed/ready launch profiles, starts and stops exclusive user-level systemd services,
-restarts the active runtime, copies the API endpoint, and opens its configuration
-in the user's Omarchy-selected editor.
+This is deliberately a runtime switcher, not a model manager. A downloaded
+GGUF file is not automatically runnable: llama.cpp still needs choices such as
+context size, GPU offload, cache types, endpoint, and possibly a matching draft
+model. Those choices live in normal systemd user services, where they remain
+testable and visible in the journal. The plugin only provides a clean control
+surface for those services.
 
-A profile is not necessarily a distinct model. For example, Fast, Daily, and
-Max may launch three quantizations of the same base model with different
-context, draft-model, and backend settings. The optional `model`, `variant`,
-and `context` fields keep that distinction clear in the panel.
+## What the panel does
 
-Ollama-owned models can be discovered from Ollama's registry by a future
-backend adapter. Raw GGUF directories are intentionally not treated as
-directly runnable: a filename alone does not describe draft-model pairing,
-context size, GPU offload, cache type, or other required launch arguments.
+- Shows the model, quantization, context, accelerator, and API endpoint detected
+  from each service's `ExecStart`.
+- Starts one profile at a time and stops conflicting profiles.
+- Stops or restarts the active profile.
+- Copies its OpenAI-compatible llama.cpp URL.
+- Keeps every model disabled at login; starting from the panel is session-only.
 
-Backends and harnesses are intentionally separate. Profiles may represent
-llama.cpp, Ollama, vLLM, or another local server; Pi, Codex, Claude Code, and
-other clients configure the endpoint independently.
+The plugin does **not** download models, generate performance settings, alter
+llama.cpp, configure coding agents, or maintain its own model database.
 
-After installation, a coding agent can read `SETUP.md`, inspect the local
-backend and models, create appropriate user services, and write the user's
-`~/.config/omarchy/local-ai.toml`.
+## Profiles
+
+The user configuration is intentionally only an index of prepared services:
+
+```toml
+default = "Q8"
+
+[[profiles]]
+name = "Q4"
+service = "qwen-fast.service"
+
+[[profiles]]
+name = "Q8"
+service = "qwen-balanced.service"
+
+[[profiles]]
+name = "Gemma"
+service = "gemma.service"
+```
+
+It lives at `~/.config/omarchy/local-ai.toml`. Profile names are arbitrary;
+three profiles may be three quantizations of one model or three completely
+different models.
+
+To add a downloaded Gemma GGUF, create and test `gemma.service`, then add the
+two-line `Gemma` entry above. This one-time machine-specific setup is a good
+task for a coding agent. The agent should follow [SETUP.md](SETUP.md), while the
+user only needs the finished profile buttons.
+
+Do not put model paths or llama.cpp launch flags in the TOML file. The plugin
+discovers them from each service. Optional `summary` and `endpoint` fields may
+override display text or the copied URL for unusual commands, but never affect
+how a model launches.
+
+## Verification
+
+```bash
+./local-ai-control doctor
+./test.sh
+```
+
+`doctor` is read-only. It reports whether every declared service and referenced
+model file is ready.
+
+## Why not Ollama?
+
+Ollama and plugins such as Colophon are better when the priority is a general
+model library with simple download-and-run behavior. This plugin exists for
+llama.cpp profiles that need explicit hardware tuning, raw GGUF files, or
+special launch arrangements such as a separate speculative draft model. It
+does not try to recreate Ollama.

@@ -28,7 +28,7 @@ Panel {
   property var status: ({
     profile: "stopped", state: "inactive", label: "Stopped", detail: "Local runtime",
     model: "", variant: "", context: "", backend: "Local AI", endpoint: "",
-    configFile: "", modelDirectory: "", defaultProfile: "", profiles: []
+    configFile: "", defaultProfile: "", profiles: []
   })
   property bool busy: false
   property string feedback: ""
@@ -40,9 +40,7 @@ Panel {
 
   function profileTitle(profile) {
     if (!profile) return ""
-    var parts = [String(profile.label || profile.id || "")]
-    if (profile.variant) parts.push(String(profile.variant))
-    return parts.filter(function(part) { return part !== "" }).join(" · ")
+    return String(profile.label || profile.id || "")
   }
 
   function activeDetail() {
@@ -348,7 +346,7 @@ Panel {
 
             Button {
               width: parent.cellWidth
-              text: root.running ? "Stop" : "Start default"
+              text: root.running ? "Stop" : "Start " + String(root.status.defaultProfile || "default")
               enabled: !root.busy && (root.running || root.status.defaultProfile !== "")
               bordered: true
               foreground: root.foreground
@@ -399,7 +397,7 @@ Panel {
 
             Button {
               width: parent.cellWidth
-              text: "Open config"
+              text: "Edit profiles"
               enabled: String(root.status.configFile || root.configFile) !== ""
               bordered: true
               foreground: root.foreground

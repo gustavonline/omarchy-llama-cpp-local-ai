@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.gustavonline.local-ai",
   "name": "Local AI",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Gustav Andersen",
   "license": "MIT",
-  "description": "Start, stop, switch, and inspect local AI runtimes from a standalone Omarchy bar panel.",
+  "description": "Start, stop, switch, and inspect prepared llama.cpp profiles from the Omarchy bar.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -13,9 +13,9 @@
   },
   "barWidget": {
     "displayName": "Local AI",
-    "description": "Control configured llama.cpp, Ollama, vLLM, or other local model services without opening a terminal.",
+    "description": "Control prepared llama.cpp systemd user services without opening a terminal.",
     "category": "AI",
-    "aliases": ["local-ai", "ollama", "models", "runtime"],
+    "aliases": ["local-ai", "llama.cpp", "models", "runtime"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
@@ -26,9 +26,9 @@
       {
         "key": "localConfigFile",
         "type": "path",
-        "label": "Runtime configuration",
+        "label": "llama.cpp profiles",
         "defaultValue": "~/.config/omarchy/local-ai.toml",
-        "description": "Commented TOML file describing the local runtime profiles."
+        "description": "TOML index of prepared llama.cpp systemd user services."
       },
       {
         "key": "refreshIntervalSec",

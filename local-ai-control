@@ -13,7 +13,7 @@ empty_status() {
     profile:"stopped", state:"inactive", label:"No local runtime configured",
     detail:("Create " + $config), backend:"Local AI", endpoint:"",
     model:"", variant:"", context:"", configFile:$config,
-    modelDirectory:"", defaultProfile:"", profiles:[]
+    defaultProfile:"", profiles:[]
   }'
 }
 
@@ -29,10 +29,22 @@ with open(sys.argv[1], "rb") as handle:
 profiles = config.get("profiles", [])
 if not isinstance(profiles, list):
     raise SystemExit("profiles must be an array of tables")
+unknown_top = sorted(set(config).difference({"default", "profiles"}))
+if unknown_top:
+    raise SystemExit(
+        "unknown top-level field(s): " + ", ".join(unknown_top) +
+        "; runtime settings are discovered from each service"
+    )
 names = []
 for profile in profiles:
     if not isinstance(profile, dict) or not profile.get("name") or not profile.get("service"):
         raise SystemExit("every profile needs name and service")
+    unknown = sorted(set(profile).difference({"name", "service", "summary", "endpoint"}))
+    if unknown:
+        raise SystemExit(
+            f"profile {profile['name']!r} has unknown field(s): " + ", ".join(unknown) +
+            "; model/backend/context belong in the service and are discovered automatically"
+        )
     names.append(profile["name"])
 if len(names) != len(set(names)):
     raise SystemExit("profile names must be unique")
@@ -43,22 +55,105 @@ print(json.dumps(config, separators=(",", ":")))
 PY
 )
 
-expand_path() {
-  printf '%s\n' "${1/#\~/$HOME}"
+inspect_unit() {
+  local unit="$1" exec_start
+  exec_start=$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)
+  python3 - "$exec_start" <<'PY'
+import json
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+raw = sys.argv[1]
+match = re.search(r"argv\[\]=(.*?)\s+;\s+ignore_errors=", raw)
+try:
+    argv = shlex.split(match.group(1)) if match else []
+except ValueError:
+    argv = []
+
+def value(*flags):
+    for index, arg in enumerate(argv):
+        for flag in flags:
+            if arg == flag and index + 1 < len(argv):
+                return argv[index + 1]
+            if arg.startswith(flag + "="):
+                return arg.split("=", 1)[1]
+    return ""
+
+executable = os.path.basename(argv[0]) if argv else ""
+backend_names = {"llama-server": "llama.cpp"}
+backend = backend_names.get(executable, executable or "Local runtime")
+
+device = value("--device")
+accelerator = ""
+if device:
+    lowered = device.lower()
+    if lowered.startswith("vulkan"):
+        accelerator = "Vulkan"
+    elif lowered.startswith("cuda"):
+        accelerator = "CUDA"
+    elif lowered.startswith("metal"):
+        accelerator = "Metal"
+    else:
+        accelerator = device
+backend_label = " · ".join(part for part in (backend, accelerator) if part)
+
+host = value("--host")
+port = value("--port")
+endpoint = ""
+if port:
+    if host in ("", "0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+    suffix = "/v1" if executable == "llama-server" else ""
+    endpoint = f"http://{host}:{port}{suffix}"
+
+context_raw = value("--ctx-size", "--ctx_size", "--max-model-len")
+context = context_raw
+if context_raw.isdigit():
+    amount = int(context_raw)
+    context = f"{amount // 1024}K" if amount >= 1024 and amount % 1024 == 0 else str(amount)
+
+model_path = value("--model")
+model = ""
+variant = ""
+if model_path:
+    stem = Path(model_path).name
+    if stem.lower().endswith(".gguf"):
+        stem = stem[:-5]
+    variant_match = re.search(r"(?:^|-)(Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32)$", stem, re.I)
+    if variant_match:
+        variant = variant_match.group(1)
+        stem = stem[:variant_match.start()].rstrip("-")
+    model = stem.replace("-", " ")
+    model = re.sub(r"\bQwen(?=\d)", "Qwen ", model)
+
+files = []
+for flag in ("--model", "--spec-draft-model"):
+    path = value(flag)
+    if path and path not in files:
+        files.append(path)
+
+print(json.dumps({
+    "backend": backend_label,
+    "endpoint": endpoint,
+    "model": model,
+    "variant": variant,
+    "context": context,
+    "files": files,
+}, separators=(",", ":")))
+PY
 }
 
 profile_ready() {
-  local profile_json="$1" encoded file expected unit
+  local profile_json="$1" runtime_json="$2" file unit
   unit=$(jq -r '.service' <<<"$profile_json")
   systemctl --user cat "$unit" >/dev/null 2>&1 || return 1
-  while IFS= read -r encoded; do
-    [[ -n $encoded ]] || continue
-    file=$(base64 -d <<<"$encoded" | jq -r '.path')
-    expected=$(base64 -d <<<"$encoded" | jq -r '.bytes // 0')
-    file=$(expand_path "$file")
+  while IFS= read -r file; do
+    [[ -n $file ]] || continue
     [[ -f $file ]] || return 1
-    (( expected == 0 )) || [[ $(stat -c %s "$file") == "$expected" ]] || return 1
-  done < <(jq -r '.files[]? | @base64' <<<"$profile_json")
+  done < <(jq -r '.files[]?' <<<"$runtime_json")
 }
 
 profile_by_id() {
@@ -83,70 +178,107 @@ active_unit() {
 status_json() {
   local profiles='[]' active_id="stopped" state="inactive" label="Stopped" detail=""
   local active_model="" active_variant="" active_context=""
-  local encoded profile id profile_label model variant context description unit ready unit_state
+  local active_backend="" active_endpoint=""
+  local encoded profile runtime id profile_label model variant context backend endpoint description unit ready unit_state
 
   while IFS= read -r encoded; do
     [[ -n $encoded ]] || continue
     profile=$(base64 -d <<<"$encoded")
     id=$(jq -r '.name' <<<"$profile")
     profile_label="$id"
-    model=$(jq -r '.model // ""' <<<"$profile")
-    variant=$(jq -r '.variant // ""' <<<"$profile")
-    context=$(jq -r '.context // ""' <<<"$profile")
-    description=$(jq -r '[.model, .variant, .context] | map(select(. != null and . != "")) | join(" · ")' <<<"$profile")
     unit=$(jq -r '.service' <<<"$profile")
+    runtime=$(inspect_unit "$unit")
+    model=$(jq -r '.model // ""' <<<"$runtime")
+    variant=$(jq -r '.variant // ""' <<<"$runtime")
+    context=$(jq -r '.context // ""' <<<"$runtime")
+    backend=$(jq -r '.backend // "Local runtime"' <<<"$runtime")
+    endpoint=$(jq -r --argjson runtime "$runtime" '.endpoint // $runtime.endpoint // ""' <<<"$profile")
+    description=$(jq -nr --arg summary "$(jq -r '.summary // ""' <<<"$profile")" \
+      --arg model "$model" --arg variant "$variant" --arg context "$context" \
+      '$summary | if . != "" then . else [$model, $variant, $context] | map(select(. != "")) | join(" · ") end')
     ready=false
-    profile_ready "$profile" && ready=true
+    profile_ready "$profile" "$runtime" && ready=true
     unit_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
     [[ $unit_state == active ]] || unit_state=$(systemctl --user is-failed "$unit" 2>/dev/null || true)
 
     profiles=$(jq -nc \
       --argjson list "$profiles" --arg id "$id" --arg label "$profile_label" \
       --arg model "$model" --arg variant "$variant" --arg context "$context" \
+      --arg backend "$backend" --arg endpoint "$endpoint" \
       --arg description "$description" --arg unit "$unit" --arg state "$unit_state" \
       --argjson ready "$ready" \
-      '$list + [{id:$id,label:$label,model:$model,variant:$variant,context:$context,description:$description,unit:$unit,state:$state,ready:$ready}]')
+      '$list + [{id:$id,label:$label,model:$model,variant:$variant,context:$context,backend:$backend,endpoint:$endpoint,description:$description,unit:$unit,state:$state,ready:$ready}]')
 
     if [[ $unit_state == active ]]; then
       active_id="$id"; state="active"; label="$profile_label"; detail="$description"
       active_model="$model"; active_variant="$variant"; active_context="$context"
+      active_backend="$backend"; active_endpoint="$endpoint"
     elif [[ $state != active && $unit_state == failed ]]; then
       active_id="$id"; state="failed"; label="$profile_label"; detail="$description"
     fi
   done < <(jq -r '.profiles[] | @base64' <<<"$config_json")
 
-  local backend endpoint default_profile model_directory
-  backend=$(jq -r '.backend // "Local runtime"' <<<"$config_json")
-  endpoint=$(jq -r '.endpoint // ""' <<<"$config_json")
+  local default_profile selected
   default_profile=$(jq -r '.default // ""' <<<"$config_json")
-  model_directory=""
-  [[ -n $detail ]] || detail="$backend${endpoint:+ · $endpoint}"
+  if [[ -z $active_backend ]]; then
+    selected=$(jq -c --arg id "$default_profile" '.[] | select(.id == $id)' <<<"$profiles")
+    [[ -n $selected ]] || selected=$(jq -c '.[0] // {}' <<<"$profiles")
+    active_backend=$(jq -r '.backend // "Local runtime"' <<<"$selected")
+    active_endpoint=$(jq -r '.endpoint // ""' <<<"$selected")
+    label=$(jq -r '.label // "Stopped"' <<<"$selected")
+    detail=$(jq -r '.description // ""' <<<"$selected")
+    active_model=$(jq -r '.model // ""' <<<"$selected")
+    active_variant=$(jq -r '.variant // ""' <<<"$selected")
+    active_context=$(jq -r '.context // ""' <<<"$selected")
+  fi
+  [[ -n $detail ]] || detail="$active_backend${active_endpoint:+ · $active_endpoint}"
 
   jq -nc \
     --arg profile "$active_id" --arg state "$state" --arg label "$label" \
     --arg model "$active_model" --arg variant "$active_variant" --arg context "$active_context" \
-    --arg detail "$detail" --arg backend "$backend" --arg endpoint "$endpoint" \
+    --arg detail "$detail" --arg backend "$active_backend" --arg endpoint "$active_endpoint" \
     --arg configFile "$config_file" \
-    --arg modelDirectory "$model_directory" --arg defaultProfile "$default_profile" \
+    --arg defaultProfile "$default_profile" \
     --argjson profiles "$profiles" \
-    '{profile:$profile,state:$state,label:$label,model:$model,variant:$variant,context:$context,detail:$detail,backend:$backend,endpoint:$endpoint,configFile:$configFile,modelDirectory:$modelDirectory,defaultProfile:$defaultProfile,profiles:$profiles}'
+    '{profile:$profile,state:$state,label:$label,model:$model,variant:$variant,context:$context,detail:$detail,backend:$backend,endpoint:$endpoint,configFile:$configFile,defaultProfile:$defaultProfile,profiles:$profiles}'
 }
 
 start_profile() {
-  local id="${1:-}" profile unit other
+  local id="${1:-}" profile runtime unit other
   [[ -n $id ]] || id=$(jq -r '.default // empty' <<<"$config_json")
   [[ -n $id ]] || { printf 'No profile selected and no default configured\n' >&2; exit 2; }
   profile=$(profile_by_id "$id") || { printf 'Unknown local runtime profile: %s\n' "$id" >&2; exit 2; }
-  profile_ready "$profile" || { printf 'Profile is not ready: %s\n' "$id" >&2; exit 1; }
   unit=$(jq -r '.service' <<<"$profile")
+  runtime=$(inspect_unit "$unit")
+  profile_ready "$profile" "$runtime" || { printf 'Profile is not ready: %s\n' "$id" >&2; exit 1; }
   while IFS= read -r other; do
-    [[ $other == "$unit" ]] || systemctl --user disable --now "$other"
+    [[ $other == "$unit" ]] || systemctl --user disable --now "$other" >/dev/null 2>&1 || true
   done < <(all_units)
-  systemctl --user enable --now "$unit"
+  # Runtime profiles are intentionally manual. Starting one from the panel
+  # must not make it start again at the next login.
+  systemctl --user disable "$unit" >/dev/null 2>&1 || true
+  systemctl --user start "$unit"
+}
+
+doctor() {
+  local status bad
+  status=$(status_json)
+  jq -r '
+    "Config: " + .configFile,
+    (.profiles[] | "- " + .id + ": " + (if .ready then "ready" else "not ready" end)
+      + " · " + .backend
+      + (if .model != "" then " · " + .model else "" end)
+      + (if .variant != "" then " · " + .variant else "" end)
+      + (if .context != "" then " · " + .context else "" end)
+      + (if .endpoint != "" then " · " + .endpoint else "" end))
+  ' <<<"$status"
+  bad=$(jq '[.profiles[] | select(.ready != true)] | length' <<<"$status")
+  (( bad == 0 ))
 }
 
 case "${1:-status}" in
   status) status_json ;;
+  doctor) doctor ;;
   start) start_profile "${2:-}" ;;
   restart)
     if unit=$(active_unit); then systemctl --user restart "$unit"; else start_profile ""; fi
@@ -155,7 +287,7 @@ case "${1:-status}" in
     while IFS= read -r unit; do systemctl --user disable --now "$unit"; done < <(all_units)
     ;;
   *)
-    printf 'Usage: %s [--config PATH] {status|start [PROFILE]|restart|stop}\n' "${0##*/}" >&2
+    printf 'Usage: %s [--config PATH] {status|doctor|start [PROFILE]|restart|stop}\n' "${0##*/}" >&2
     exit 2
     ;;
 esac

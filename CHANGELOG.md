@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Discover model, quantization, context, accelerator, and endpoint directly
+  from each configured llama.cpp service.
+- Keep the editable configuration to profile names and service names.
+- Keep all runtimes disabled at login and start them only on demand.
+- Add a read-only doctor command and regression coverage for profile startup.
+- Fix profile startup failing before systemd was called.
+
 ## 0.2.0
 
 - Replace the verbose JSON configuration with a short, commented TOML file.

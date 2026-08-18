@@ -1,24 +1,30 @@
-# Setup contract
+# Coding-agent setup contract
 
-This plugin is a generic control surface. It does not install a backend,
-download models, or guess performance settings.
+Use this workflow when installing the plugin or adding a model. Keep the
+architecture to three layers:
 
-## Coding-agent workflow
+1. A GGUF model and any matching draft model.
+2. One tested systemd **user** service containing the llama-server command.
+3. One `name`/`service` entry in `~/.config/omarchy/local-ai.toml`.
 
-1. Inspect the machine, installed local-AI backends, model files, and available
-   accelerators.
-2. Create one user-level systemd service per useful launch profile. Profiles
-   should conflict with each other when they share an endpoint or accelerator.
-3. Copy `local-ai.example.toml` to `~/.config/omarchy/local-ai.toml` and fill
-   in the short, commented profile list.
-4. Validate every required file, start the default profile, and verify the
-   configured endpoint.
-5. Leave only the default profile enabled.
+## Add or change a profile
 
-Each profile has one freely chosen `name`; there is no separate ID or fixed
-Fast/Daily/Max meaning. Profiles may run variants of one model or entirely
-different models. `service` connects the display entry to its systemd user
-service; the remaining technical launch arguments stay in that service.
+1. Inspect the machine, llama.cpp build, accelerator, available memory, model
+   files, and existing profile services.
+2. Choose launch arguments appropriate for that machine and model. Do not copy
+   another model's context, cache, GPU, or speculative-decoding settings without
+   verifying compatibility.
+3. Create one user service per useful launch profile. Services sharing an
+   endpoint or accelerator should conflict with each other.
+4. Run `systemctl --user daemon-reload`, start the new service directly, wait
+   for the API to become ready, make a small inference request, then stop it.
+5. Add only its friendly name and unit name to `local-ai.toml`.
+6. Run `local-ai-control doctor` and `test.sh`.
+7. Leave the service disabled. The panel must start it only on demand.
 
-The plugin performs readiness checks and controls the declared systemd user
-services. Agent harnesses configure and consume the endpoint independently.
+The service is the source of truth. The plugin reads `--model`,
+`--spec-draft-model`, `--ctx-size`, `--device`, `--host`, and `--port` from its
+`ExecStart`; it does not generate, rewrite, or own services.
+
+Harnesses such as Pi or Codex are separate clients. Configure them against the
+endpoint shown by the panel after the runtime has been verified.
