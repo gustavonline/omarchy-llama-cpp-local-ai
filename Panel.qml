@@ -162,29 +162,21 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: ""
-    iconComponent: Component {
-      Item {
-        Text {
-          anchors.centerIn: parent
-          text: "󰍛"
-          color: root.foreground
-          opacity: 1.0
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-        }
-        Rectangle {
-          visible: root.running || root.failed
-          width: root.running ? Style.space(5) : Style.space(4)
-          height: width
-          radius: width / 2
-          anchors.right: parent.right
-          anchors.bottom: parent.bottom
-          anchors.rightMargin: Style.space(2)
-          anchors.bottomMargin: Style.space(2)
-          color: root.failed ? Color.urgent : root.accent
-        }
-      }
+    text: "󰍛"
+    tooltipText: "Local AI"
+    active: root.running
+    useActiveColor: false
+
+    Rectangle {
+      visible: root.running || root.failed
+      width: root.running ? Style.space(5) : Style.space(4)
+      height: width
+      radius: width / 2
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.rightMargin: Style.space(2)
+      anchors.bottomMargin: Style.space(2)
+      color: root.failed ? Color.urgent : root.accent
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.runAction(root.running ? "stop" : "start", "")
