@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_file="${OMARCHY_LOCAL_AI_CONFIG:-$HOME/.config/omarchy/local-ai.json}"
+if [[ ${1:-} == --config ]]; then
+  config_file="${2:-}"
+  shift 2
+fi
+config_file="${config_file/#\~/$HOME}"
+
+empty_status() {
+  jq -nc --arg config "$config_file" '{
+    profile:"stopped", state:"inactive", label:"No local runtime configured",
+    detail:("Create " + $config), backend:"Local AI", endpoint:"",
+    modelDirectory:"", defaultProfile:"", profiles:[]
+  }'
+}
+
+[[ -f $config_file ]] || { empty_status; exit 0; }
+jq -e '.profiles | type == "array"' "$config_file" >/dev/null
+
+expand_path() {
+  printf '%s\n' "${1/#\~/$HOME}"
+}
+
+profile_ready() {
+  local profile_json="$1" encoded file expected
+  while IFS= read -r encoded; do
+    [[ -n $encoded ]] || continue
+    file=$(base64 -d <<<"$encoded" | jq -r '.path')
+    expected=$(base64 -d <<<"$encoded" | jq -r '.bytes // 0')
+    file=$(expand_path "$file")
+    [[ -f $file ]] || return 1
+    (( expected == 0 )) || [[ $(stat -c %s "$file") == "$expected" ]] || return 1
+  done < <(jq -r '.requiredFiles[]? | @base64' <<<"$profile_json")
+}
+
+profile_by_id() {
+  jq -ce --arg id "$1" '.profiles[] | select(.id == $id)' "$config_file"
+}
+
+all_units() {
+  jq -r '.profiles[].unit' "$config_file" | awk 'NF && !seen[$0]++'
+}
+
+active_unit() {
+  local unit
+  while IFS= read -r unit; do
+    if systemctl --user is-active --quiet "$unit"; then
+      printf '%s\n' "$unit"
+      return 0
+    fi
+  done < <(all_units)
+  return 1
+}
+
+status_json() {
+  local profiles='[]' active_id="stopped" state="inactive" label="Stopped" detail=""
+  local encoded profile id profile_label description unit ready unit_state
+
+  while IFS= read -r encoded; do
+    [[ -n $encoded ]] || continue
+    profile=$(base64 -d <<<"$encoded")
+    id=$(jq -r '.id' <<<"$profile")
+    profile_label=$(jq -r '.label // .id' <<<"$profile")
+    description=$(jq -r '.description // ""' <<<"$profile")
+    unit=$(jq -r '.unit' <<<"$profile")
+    ready=false
+    profile_ready "$profile" && ready=true
+    unit_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+    [[ $unit_state == active ]] || unit_state=$(systemctl --user is-failed "$unit" 2>/dev/null || true)
+
+    profiles=$(jq -nc \
+      --argjson list "$profiles" --arg id "$id" --arg label "$profile_label" \
+      --arg description "$description" --arg unit "$unit" --arg state "$unit_state" \
+      --argjson ready "$ready" \
+      '$list + [{id:$id,label:$label,description:$description,unit:$unit,state:$state,ready:$ready}]')
+
+    if [[ $unit_state == active ]]; then
+      active_id="$id"; state="active"; label="$profile_label"; detail="$description"
+    elif [[ $state != active && $unit_state == failed ]]; then
+      active_id="$id"; state="failed"; label="$profile_label"; detail="$description"
+    fi
+  done < <(jq -r '.profiles[] | @base64' "$config_file")
+
+  local backend endpoint default_profile model_directory
+  backend=$(jq -r '.backend // "Local runtime"' "$config_file")
+  endpoint=$(jq -r '.endpoint // ""' "$config_file")
+  default_profile=$(jq -r '.defaultProfile // ""' "$config_file")
+  model_directory=$(expand_path "$(jq -r '.modelDirectory // ""' "$config_file")")
+  [[ -n $detail ]] || detail="$backend${endpoint:+ · $endpoint}"
+
+  jq -nc \
+    --arg profile "$active_id" --arg state "$state" --arg label "$label" \
+    --arg detail "$detail" --arg backend "$backend" --arg endpoint "$endpoint" \
+    --arg modelDirectory "$model_directory" --arg defaultProfile "$default_profile" \
+    --argjson profiles "$profiles" \
+    '{profile:$profile,state:$state,label:$label,detail:$detail,backend:$backend,endpoint:$endpoint,modelDirectory:$modelDirectory,defaultProfile:$defaultProfile,profiles:$profiles}'
+}
+
+start_profile() {
+  local id="${1:-}" profile unit other
+  [[ -n $id ]] || id=$(jq -r '.defaultProfile // empty' "$config_file")
+  [[ -n $id ]] || { printf 'No profile selected and no defaultProfile configured\n' >&2; exit 2; }
+  profile=$(profile_by_id "$id") || { printf 'Unknown local runtime profile: %s\n' "$id" >&2; exit 2; }
+  profile_ready "$profile" || { printf 'Profile is not ready: %s\n' "$id" >&2; exit 1; }
+  unit=$(jq -r '.unit' <<<"$profile")
+  while IFS= read -r other; do
+    [[ $other == "$unit" ]] || systemctl --user disable --now "$other"
+  done < <(all_units)
+  systemctl --user enable --now "$unit"
+}
+
+case "${1:-status}" in
+  status) status_json ;;
+  start) start_profile "${2:-}" ;;
+  restart)
+    if unit=$(active_unit); then systemctl --user restart "$unit"; else start_profile ""; fi
+    ;;
+  stop)
+    while IFS= read -r unit; do systemctl --user disable --now "$unit"; done < <(all_units)
+    ;;
+  *)
+    printf 'Usage: %s [--config PATH] {status|start [PROFILE]|restart|stop}\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac

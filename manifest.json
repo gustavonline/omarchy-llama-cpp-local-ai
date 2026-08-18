@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.gustavonline.local-ai",
+  "name": "Local AI",
+  "version": "0.1.0",
+  "author": "Gustav Andersen",
+  "license": "MIT",
+  "description": "Start, stop, switch, and inspect local AI runtimes from a standalone Omarchy bar panel.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Local AI",
+    "description": "Control configured llama.cpp, Ollama, vLLM, or other local model services without opening a terminal.",
+    "category": "AI",
+    "aliases": ["local-ai", "ollama", "models", "runtime"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "localConfigFile": "~/.config/omarchy/local-ai.json",
+      "refreshIntervalSec": 10
+    },
+    "schema": [
+      {
+        "key": "localConfigFile",
+        "type": "path",
+        "label": "Runtime configuration",
+        "defaultValue": "~/.config/omarchy/local-ai.json",
+        "description": "JSON file describing local runtime profiles, services, model files, and endpoint."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 10
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "defaultProfile": "daily",
+  "backend": "Local AI",
+  "endpoint": "http://127.0.0.1:8080/v1",
+  "modelDirectory": "~/Models",
+  "profiles": [
+    {
+      "id": "daily",
+      "label": "Daily model",
+      "description": "Balanced local model",
+      "unit": "local-ai-daily.service",
+      "requiredFiles": [
+        { "path": "~/Models/daily.gguf", "bytes": 0 }
+      ]
+    }
+  ]
+}
