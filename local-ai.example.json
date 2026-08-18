@@ -7,6 +7,9 @@
     {
       "id": "daily",
       "label": "Daily model",
+      "model": "Example 8B",
+      "variant": "Q8_0",
+      "context": "32K",
       "description": "Balanced local model",
       "unit": "local-ai-daily.service",
       "requiredFiles": [

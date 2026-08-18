@@ -12,7 +12,7 @@ empty_status() {
   jq -nc --arg config "$config_file" '{
     profile:"stopped", state:"inactive", label:"No local runtime configured",
     detail:("Create " + $config), backend:"Local AI", endpoint:"",
-    modelDirectory:"", defaultProfile:"", profiles:[]
+    model:"", variant:"", context:"", modelDirectory:"", defaultProfile:"", profiles:[]
   }'
 }
 
@@ -56,13 +56,17 @@ active_unit() {
 
 status_json() {
   local profiles='[]' active_id="stopped" state="inactive" label="Stopped" detail=""
-  local encoded profile id profile_label description unit ready unit_state
+  local active_model="" active_variant="" active_context=""
+  local encoded profile id profile_label model variant context description unit ready unit_state
 
   while IFS= read -r encoded; do
     [[ -n $encoded ]] || continue
     profile=$(base64 -d <<<"$encoded")
     id=$(jq -r '.id' <<<"$profile")
     profile_label=$(jq -r '.label // .id' <<<"$profile")
+    model=$(jq -r '.model // ""' <<<"$profile")
+    variant=$(jq -r '.variant // ""' <<<"$profile")
+    context=$(jq -r '.context // ""' <<<"$profile")
     description=$(jq -r '.description // ""' <<<"$profile")
     unit=$(jq -r '.unit' <<<"$profile")
     ready=false
@@ -72,12 +76,14 @@ status_json() {
 
     profiles=$(jq -nc \
       --argjson list "$profiles" --arg id "$id" --arg label "$profile_label" \
+      --arg model "$model" --arg variant "$variant" --arg context "$context" \
       --arg description "$description" --arg unit "$unit" --arg state "$unit_state" \
       --argjson ready "$ready" \
-      '$list + [{id:$id,label:$label,description:$description,unit:$unit,state:$state,ready:$ready}]')
+      '$list + [{id:$id,label:$label,model:$model,variant:$variant,context:$context,description:$description,unit:$unit,state:$state,ready:$ready}]')
 
     if [[ $unit_state == active ]]; then
       active_id="$id"; state="active"; label="$profile_label"; detail="$description"
+      active_model="$model"; active_variant="$variant"; active_context="$context"
     elif [[ $state != active && $unit_state == failed ]]; then
       active_id="$id"; state="failed"; label="$profile_label"; detail="$description"
     fi
@@ -92,10 +98,11 @@ status_json() {
 
   jq -nc \
     --arg profile "$active_id" --arg state "$state" --arg label "$label" \
+    --arg model "$active_model" --arg variant "$active_variant" --arg context "$active_context" \
     --arg detail "$detail" --arg backend "$backend" --arg endpoint "$endpoint" \
     --arg modelDirectory "$model_directory" --arg defaultProfile "$default_profile" \
     --argjson profiles "$profiles" \
-    '{profile:$profile,state:$state,label:$label,detail:$detail,backend:$backend,endpoint:$endpoint,modelDirectory:$modelDirectory,defaultProfile:$defaultProfile,profiles:$profiles}'
+    '{profile:$profile,state:$state,label:$label,model:$model,variant:$variant,context:$context,detail:$detail,backend:$backend,endpoint:$endpoint,modelDirectory:$modelDirectory,defaultProfile:$defaultProfile,profiles:$profiles}'
 }
 
 start_profile() {

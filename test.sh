@@ -17,7 +17,13 @@ bash -n "$plugin_dir/local-ai-control"
   (.endpoint | type == "string") and
   (.modelDirectory | type == "string") and
   (.profiles | type == "array") and
-  (all(.profiles[]; (.id | type == "string") and (.ready | type == "boolean")))
+  (all(.profiles[];
+    (.id | type == "string") and
+    (.model | type == "string") and
+    (.variant | type == "string") and
+    (.context | type == "string") and
+    (.ready | type == "boolean")
+  ))
 ' >/dev/null
 
 if command -v omarchy >/dev/null; then

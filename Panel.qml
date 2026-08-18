@@ -27,7 +27,8 @@ Panel {
 
   property var status: ({
     profile: "stopped", state: "inactive", label: "Stopped", detail: "Local runtime",
-    backend: "Local AI", endpoint: "", modelDirectory: "", defaultProfile: "", profiles: []
+    model: "", variant: "", context: "", backend: "Local AI", endpoint: "",
+    modelDirectory: "", defaultProfile: "", profiles: []
   })
   property bool busy: false
   property string feedback: ""
@@ -36,6 +37,21 @@ Panel {
   readonly property bool running: status.state === "active"
   readonly property bool failed: status.state === "failed"
   readonly property string stateLabel: busy ? "Switching…" : (running ? "Running" : (failed ? "Failed" : "Stopped"))
+
+  function profileTitle(profile) {
+    if (!profile) return ""
+    var parts = [String(profile.label || profile.id || "")]
+    if (profile.variant) parts.push(String(profile.variant))
+    return parts.filter(function(part) { return part !== "" }).join(" · ")
+  }
+
+  function activeDetail() {
+    var parts = []
+    if (status.label && status.label !== status.model) parts.push(String(status.label))
+    if (status.variant) parts.push(String(status.variant))
+    if (status.context) parts.push(String(status.context) + " context")
+    return parts.length > 0 ? parts.join(" · ") : String(status.detail || "Local runtime")
+  }
 
   visible: true
   implicitWidth: button.implicitWidth
@@ -238,7 +254,7 @@ Panel {
               anchors.right: activeState.left
               anchors.rightMargin: Style.spacing.md
               anchors.verticalCenter: parent.verticalCenter
-              text: String(root.status.label || "Stopped")
+              text: String(root.status.model || root.status.label || "Stopped")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -259,7 +275,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: String(root.status.detail || "Local runtime")
+            text: root.activeDetail()
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -270,7 +286,7 @@ Panel {
 
           PanelSectionHeader {
             width: parent.width
-            text: "MODELS"
+            text: "RUNTIME PROFILES"
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -278,9 +294,9 @@ Panel {
           Grid {
             id: profileGrid
             width: parent.width
-            columns: 2
+            columns: Math.max(1, Math.min(3, (root.status.profiles || []).length))
             spacing: Style.spacing.md
-            readonly property real cellWidth: (width - spacing) / 2
+            readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
 
             Repeater {
               model: root.status.profiles || []
@@ -288,7 +304,7 @@ Panel {
               Button {
                 required property var modelData
                 width: profileGrid.cellWidth
-                text: String(modelData.label || modelData.id)
+                text: root.profileTitle(modelData)
                 selected: root.status.profile === modelData.id
                 enabled: !root.busy && modelData.ready === true
                 bordered: true
@@ -308,6 +324,18 @@ Panel {
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          Text {
+            visible: (root.status.profiles || []).length > 0
+            width: parent.width
+            text: (root.status.profiles || []).length + " configured · "
+              + (root.status.profiles || []).filter(function(profile) { return profile.ready === true }).length
+              + " ready · local-ai.json"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
             horizontalAlignment: Text.AlignHCenter
           }
 
