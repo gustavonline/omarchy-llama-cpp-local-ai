@@ -8,6 +8,7 @@
 - Keep all runtimes disabled at login and start them only on demand.
 - Add a read-only doctor command and regression coverage for profile startup.
 - Fix profile startup failing before systemd was called.
+- Improve bar-icon contrast while retaining the active-runtime indicator.
 
 ## 0.2.0
 

@@ -169,13 +169,13 @@ Panel {
           anchors.centerIn: parent
           text: "󰍛"
           color: root.foreground
-          opacity: root.running ? 1.0 : 0.55
+          opacity: 1.0
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
         }
         Rectangle {
           visible: root.running || root.failed
-          width: Style.space(4)
+          width: root.running ? Style.space(5) : Style.space(4)
           height: width
           radius: width / 2
           anchors.right: parent.right
