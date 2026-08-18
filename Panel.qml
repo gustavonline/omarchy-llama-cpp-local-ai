@@ -19,7 +19,7 @@ Panel {
     String(Qt.resolvedUrl("local-ai-control")).replace(/^file:\/\//, "")
   )
   readonly property string configFile: String(
-    settings && settings.localConfigFile ? settings.localConfigFile : "~/.config/omarchy/local-ai.json"
+    settings && settings.localConfigFile ? settings.localConfigFile : "~/.config/omarchy/local-ai.toml"
   )
   readonly property int refreshInterval: Math.max(5, Number(
     settings && settings.refreshIntervalSec ? settings.refreshIntervalSec : 10
@@ -154,7 +154,7 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refresh(); return "ok" }
-    function start(profile): string { root.runAction("start", profile); return "ok" }
+    function start(profile: string): string { root.runAction("start", profile); return "ok" }
     function stop(): string { root.runAction("stop", ""); return "ok" }
     function restart(): string { root.runAction("restart", ""); return "ok" }
     function status(): string { return root.stateLabel }

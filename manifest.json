@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.gustavonline.local-ai",
   "name": "Local AI",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Gustav Andersen",
   "license": "MIT",
   "description": "Start, stop, switch, and inspect local AI runtimes from a standalone Omarchy bar panel.",
@@ -19,7 +19,7 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "localConfigFile": "~/.config/omarchy/local-ai.json",
+      "localConfigFile": "~/.config/omarchy/local-ai.toml",
       "refreshIntervalSec": 10
     },
     "schema": [
@@ -27,8 +27,8 @@
         "key": "localConfigFile",
         "type": "path",
         "label": "Runtime configuration",
-        "defaultValue": "~/.config/omarchy/local-ai.json",
-        "description": "JSON file describing local runtime profiles, services, model files, and endpoint."
+        "defaultValue": "~/.config/omarchy/local-ai.toml",
+        "description": "Commented TOML file describing the local runtime profiles."
       },
       {
         "key": "refreshIntervalSec",

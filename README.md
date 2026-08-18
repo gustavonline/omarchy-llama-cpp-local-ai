@@ -4,7 +4,8 @@ A standalone Omarchy bar widget for controlling local AI runtimes without a
 terminal. It does not clone, replace, or depend on Omarchy's built-in Agents
 widget.
 
-The panel discovers profiles from `~/.config/omarchy/local-ai.json`, displays
+The panel discovers profiles from the commented and user-editable
+`~/.config/omarchy/local-ai.toml`, displays
 installed/ready launch profiles, starts and stops exclusive user-level systemd services,
 restarts the active runtime, copies the API endpoint, and opens its configuration
 in the user's Omarchy-selected editor.
@@ -23,6 +24,6 @@ Backends and harnesses are intentionally separate. Profiles may represent
 llama.cpp, Ollama, vLLM, or another local server; Pi, Codex, Claude Code, and
 other clients configure the endpoint independently.
 
-After installation, a coding agent can read `SETUP.md` and
-`local-ai.schema.json`, inspect the local backend and models, create appropriate
-user services, and write the user's `~/.config/omarchy/local-ai.json`.
+After installation, a coding agent can read `SETUP.md`, inspect the local
+backend and models, create appropriate user services, and write the user's
+`~/.config/omarchy/local-ai.toml`.

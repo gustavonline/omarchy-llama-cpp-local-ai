@@ -1,0 +1,29 @@
+# The API address used by coding agents. Usually this should not be changed.
+endpoint = "http://127.0.0.1:8080/v1"
+backend = "Local AI"
+
+# This must exactly match one of the three profile names below.
+default = "Balanced"
+
+# Profiles are independent: they may be variants of one model or three
+# completely different models. Add, remove, or rename profiles as needed.
+[[profiles]]
+name = "Quick"
+model = "Example 8B"
+variant = "Q4"
+context = "32K"
+service = "local-ai-quick.service" # The systemd service that starts it.
+
+[[profiles]]
+name = "Balanced"
+model = "Example 27B"
+variant = "Q8"
+context = "64K"
+service = "local-ai-balanced.service"
+
+[[profiles]]
+name = "Quality"
+model = "Example 70B"
+variant = "BF16"
+context = "32K"
+service = "local-ai-quality.service"

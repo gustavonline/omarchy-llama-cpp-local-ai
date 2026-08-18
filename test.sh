@@ -11,7 +11,7 @@ jq -e '
 ' "$plugin_dir/manifest.json" >/dev/null
 
 bash -n "$plugin_dir/local-ai-control"
-"$plugin_dir/local-ai-control" --config "$plugin_dir/local-ai.example.json" status | jq -e '
+"$plugin_dir/local-ai-control" --config "$plugin_dir/local-ai.example.toml" status | jq -e '
   (.profile | type == "string") and
   (.state | type == "string") and
   (.endpoint | type == "string") and
