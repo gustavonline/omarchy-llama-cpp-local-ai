@@ -12,12 +12,13 @@ empty_status() {
   jq -nc --arg config "$config_file" '{
     profile:"stopped", state:"inactive", label:"No local runtime configured",
     detail:("Create " + $config), backend:"Local AI", endpoint:"",
-    model:"", variant:"", context:"", modelDirectory:"", defaultProfile:"", profiles:[]
+    model:"", variant:"", context:"", configFile:$config,
+    modelDirectory:"", defaultProfile:"", profiles:[]
   }'
 }
 
 [[ -f $config_file ]] || { empty_status; exit 0; }
-jq -e '.profiles | type == "array"' "$config_file" >/dev/null
+jq -e '(.schemaVersion // 1) == 1 and (.profiles | type == "array")' "$config_file" >/dev/null
 
 expand_path() {
   printf '%s\n' "${1/#\~/$HOME}"
@@ -100,9 +101,10 @@ status_json() {
     --arg profile "$active_id" --arg state "$state" --arg label "$label" \
     --arg model "$active_model" --arg variant "$active_variant" --arg context "$active_context" \
     --arg detail "$detail" --arg backend "$backend" --arg endpoint "$endpoint" \
+    --arg configFile "$config_file" \
     --arg modelDirectory "$model_directory" --arg defaultProfile "$default_profile" \
     --argjson profiles "$profiles" \
-    '{profile:$profile,state:$state,label:$label,model:$model,variant:$variant,context:$context,detail:$detail,backend:$backend,endpoint:$endpoint,modelDirectory:$modelDirectory,defaultProfile:$defaultProfile,profiles:$profiles}'
+    '{profile:$profile,state:$state,label:$label,model:$model,variant:$variant,context:$context,detail:$detail,backend:$backend,endpoint:$endpoint,configFile:$configFile,modelDirectory:$modelDirectory,defaultProfile:$defaultProfile,profiles:$profiles}'
 }
 
 start_profile() {

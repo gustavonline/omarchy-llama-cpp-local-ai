@@ -28,7 +28,7 @@ Panel {
   property var status: ({
     profile: "stopped", state: "inactive", label: "Stopped", detail: "Local runtime",
     model: "", variant: "", context: "", backend: "Local AI", endpoint: "",
-    modelDirectory: "", defaultProfile: "", profiles: []
+    configFile: "", modelDirectory: "", defaultProfile: "", profiles: []
   })
   property bool busy: false
   property string feedback: ""
@@ -76,10 +76,12 @@ Panel {
     copyProcess.running = true
   }
 
-  function openModels() {
-    if (!status.modelDirectory || openModelsProcess.running) return
-    openModelsProcess.command = ["xdg-open", String(status.modelDirectory)]
-    openModelsProcess.running = true
+  function openConfig() {
+    if (openConfigProcess.running) return
+    var path = String(status.configFile || configFile)
+    if (path === "") return
+    openConfigProcess.command = ["omarchy", "launch", "config", "editor", path]
+    openConfigProcess.running = true
   }
 
   onOpenedChanged: if (opened) {
@@ -139,9 +141,9 @@ Panel {
   }
 
   Process {
-    id: openModelsProcess
+    id: openConfigProcess
     running: false
-    onExited: function(exitCode) { if (exitCode !== 0) root.feedback = "Could not open model folder" }
+    onExited: function(exitCode) { if (exitCode !== 0) root.feedback = "Could not open config" }
   }
 
   IpcHandler {
@@ -330,9 +332,9 @@ Panel {
           Text {
             visible: (root.status.profiles || []).length > 0
             width: parent.width
-            text: (root.status.profiles || []).length + " configured · "
+            text: (root.status.profiles || []).length + " profiles · "
               + (root.status.profiles || []).filter(function(profile) { return profile.ready === true }).length
-              + " ready · local-ai.json"
+              + " ready"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -385,7 +387,7 @@ Panel {
 
             Button {
               width: parent.cellWidth
-              text: "Copy endpoint"
+              text: "Copy URL"
               enabled: String(root.status.endpoint || "") !== ""
               bordered: true
               foreground: root.foreground
@@ -397,14 +399,14 @@ Panel {
 
             Button {
               width: parent.cellWidth
-              text: "Open models"
-              enabled: String(root.status.modelDirectory || "") !== ""
+              text: "Open config"
+              enabled: String(root.status.configFile || root.configFile) !== ""
               bordered: true
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.bodySmall
               verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.openModels()
+              onClicked: root.openConfig()
             }
           }
 

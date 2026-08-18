@@ -15,6 +15,7 @@ bash -n "$plugin_dir/local-ai-control"
   (.profile | type == "string") and
   (.state | type == "string") and
   (.endpoint | type == "string") and
+  (.configFile | type == "string") and
   (.modelDirectory | type == "string") and
   (.profiles | type == "array") and
   (all(.profiles[];

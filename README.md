@@ -6,8 +6,8 @@ widget.
 
 The panel discovers profiles from `~/.config/omarchy/local-ai.json`, displays
 installed/ready launch profiles, starts and stops exclusive user-level systemd services,
-restarts the active runtime, copies the API endpoint, and opens the configured
-model directory.
+restarts the active runtime, copies the API endpoint, and opens its configuration
+in the user's Omarchy-selected editor.
 
 A profile is not necessarily a distinct model. For example, Fast, Daily, and
 Max may launch three quantizations of the same base model with different
@@ -23,4 +23,6 @@ Backends and harnesses are intentionally separate. Profiles may represent
 llama.cpp, Ollama, vLLM, or another local server; Pi, Codex, Claude Code, and
 other clients configure the endpoint independently.
 
-See `local-ai.example.json` for the configuration shape.
+After installation, a coding agent can read `SETUP.md` and
+`local-ai.schema.json`, inspect the local backend and models, create appropriate
+user services, and write the user's `~/.config/omarchy/local-ai.json`.
