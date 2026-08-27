@@ -7,6 +7,7 @@ if [[ ${1:-} == --config ]]; then
   shift 2
 fi
 config_file="${config_file/#\~/$HOME}"
+requested_action="${1:-status}"
 
 empty_status() {
   jq -nc --arg config "$config_file" '{
@@ -17,9 +18,17 @@ empty_status() {
   }'
 }
 
-[[ -f $config_file ]] || { empty_status; exit 0; }
+if [[ ! -f $config_file ]]; then
+  if [[ $requested_action == doctor ]]; then
+    printf 'Config not found: %s\n' "$config_file" >&2
+    exit 1
+  fi
+  empty_status
+  exit 0
+fi
 config_json=$(python3 - "$config_file" <<'PY'
 import json
+import re
 import sys
 import tomllib
 
@@ -36,6 +45,8 @@ if unknown_top:
         "; runtime settings are discovered from each service"
     )
 names = []
+if "default" in config and not isinstance(config["default"], str):
+    raise SystemExit("default must be a profile name string")
 for profile in profiles:
     if not isinstance(profile, dict) or not profile.get("name") or not profile.get("service"):
         raise SystemExit("every profile needs name and service")
@@ -45,6 +56,15 @@ for profile in profiles:
             f"profile {profile['name']!r} has unknown field(s): " + ", ".join(unknown) +
             "; model/backend/context belong in the service and are discovered automatically"
         )
+    if not isinstance(profile["name"], str) or not profile["name"].strip():
+        raise SystemExit("profile names must be non-empty strings")
+    if not isinstance(profile["service"], str) or not re.fullmatch(
+        r"[A-Za-z0-9_.@:-]+\.service", profile["service"]
+    ):
+        raise SystemExit(f"profile {profile['name']!r} has an invalid systemd user service name")
+    for optional in ("summary", "endpoint"):
+        if optional in profile and not isinstance(profile[optional], str):
+            raise SystemExit(f"profile {profile['name']!r} field {optional!r} must be a string")
     names.append(profile["name"])
 if len(names) != len(set(names)):
     raise SystemExit("profile names must be unique")
@@ -57,7 +77,7 @@ PY
 
 inspect_unit() {
   local unit="$1" exec_start
-  exec_start=$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)
+  exec_start=$(systemctl --user show --property=ExecStart --value -- "$unit" 2>/dev/null || true)
   python3 - "$exec_start" <<'PY'
 import json
 import os
@@ -149,7 +169,7 @@ PY
 profile_ready() {
   local profile_json="$1" runtime_json="$2" file unit
   unit=$(jq -r '.service' <<<"$profile_json")
-  systemctl --user cat "$unit" >/dev/null 2>&1 || return 1
+  systemctl --user cat -- "$unit" >/dev/null 2>&1 || return 1
   while IFS= read -r file; do
     [[ -n $file ]] || continue
     [[ -f $file ]] || return 1
@@ -167,7 +187,7 @@ all_units() {
 active_unit() {
   local unit
   while IFS= read -r unit; do
-    if systemctl --user is-active --quiet "$unit"; then
+    if systemctl --user is-active --quiet -- "$unit"; then
       printf '%s\n' "$unit"
       return 0
     fi
@@ -198,8 +218,8 @@ status_json() {
       '$summary | if . != "" then . else [$model, $variant, $context] | map(select(. != "")) | join(" · ") end')
     ready=false
     profile_ready "$profile" "$runtime" && ready=true
-    unit_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
-    [[ $unit_state == active ]] || unit_state=$(systemctl --user is-failed "$unit" 2>/dev/null || true)
+    unit_state=$(systemctl --user is-active -- "$unit" 2>/dev/null || true)
+    [[ $unit_state == active ]] || unit_state=$(systemctl --user is-failed -- "$unit" 2>/dev/null || true)
 
     profiles=$(jq -nc \
       --argjson list "$profiles" --arg id "$id" --arg label "$profile_label" \
@@ -252,16 +272,16 @@ start_profile() {
   runtime=$(inspect_unit "$unit")
   profile_ready "$profile" "$runtime" || { printf 'Profile is not ready: %s\n' "$id" >&2; exit 1; }
   while IFS= read -r other; do
-    [[ $other == "$unit" ]] || systemctl --user disable --now "$other" >/dev/null 2>&1 || true
+    [[ $other == "$unit" ]] || systemctl --user disable --now -- "$other" >/dev/null 2>&1 || true
   done < <(all_units)
   # Runtime profiles are intentionally manual. Starting one from the panel
   # must not make it start again at the next login.
-  systemctl --user disable "$unit" >/dev/null 2>&1 || true
-  systemctl --user start "$unit"
+  systemctl --user disable -- "$unit" >/dev/null 2>&1 || true
+  systemctl --user start -- "$unit"
 }
 
 doctor() {
-  local status bad
+  local status bad count
   status=$(status_json)
   jq -r '
     "Config: " + .configFile,
@@ -273,7 +293,8 @@ doctor() {
       + (if .endpoint != "" then " · " + .endpoint else "" end))
   ' <<<"$status"
   bad=$(jq '[.profiles[] | select(.ready != true)] | length' <<<"$status")
-  (( bad == 0 ))
+  count=$(jq '.profiles | length' <<<"$status")
+  (( count > 0 && bad == 0 ))
 }
 
 case "${1:-status}" in
@@ -281,10 +302,10 @@ case "${1:-status}" in
   doctor) doctor ;;
   start) start_profile "${2:-}" ;;
   restart)
-    if unit=$(active_unit); then systemctl --user restart "$unit"; else start_profile ""; fi
+    if unit=$(active_unit); then systemctl --user restart -- "$unit"; else start_profile ""; fi
     ;;
   stop)
-    while IFS= read -r unit; do systemctl --user disable --now "$unit"; done < <(all_units)
+    while IFS= read -r unit; do systemctl --user disable --now -- "$unit"; done < <(all_units)
     ;;
   *)
     printf 'Usage: %s [--config PATH] {status|doctor|start [PROFILE]|restart|stop}\n' "${0##*/}" >&2

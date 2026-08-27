@@ -22,6 +22,35 @@ architecture to three layers:
 6. Run `local-ai-control doctor` and `test.sh`.
 7. Leave the service disabled. The panel must start it only on demand.
 
+## Minimal service shape
+
+Use this only as a structural example. Replace every model path and choose
+context, accelerator, cache, and offload settings from measurements on the target
+machine:
+
+```ini
+[Unit]
+Description=Local llama.cpp profile
+Conflicts=local-ai-other.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/llama-server \
+  --model %h/.local/share/models/example.gguf \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --ctx-size 8192
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+Do not add secrets to the plugin TOML. If the service uses `--api-key`, keep the
+credential in the service or a protected environment file and configure clients
+separately. The panel intentionally copies only the endpoint.
+
 The service is the source of truth. The plugin reads `--model`,
 `--spec-draft-model`, `--ctx-size`, `--device`, `--host`, and `--port` from its
 `ExecStart`; it does not generate, rewrite, or own services.

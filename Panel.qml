@@ -14,6 +14,7 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color accent: Color.accent
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string controlPath: decodeURIComponent(
     String(Qt.resolvedUrl("local-ai-control")).replace(/^file:\/\//, "")
@@ -32,6 +33,9 @@ Panel {
   })
   property bool busy: false
   property string feedback: ""
+  property bool feedbackIsError: false
+  property string pendingAction: ""
+  property string pendingProfile: ""
   property bool cursorActive: false
 
   readonly property bool running: status.state === "active"
@@ -59,10 +63,30 @@ Panel {
     if (!statusProcess.running) statusProcess.running = true
   }
 
+  function clearFeedback() {
+    feedbackClearTimer.stop()
+    feedback = ""
+    feedbackIsError = false
+  }
+
+  function showTransientFeedback(message) {
+    feedbackIsError = false
+    feedback = message
+    feedbackClearTimer.restart()
+  }
+
+  function showError(message) {
+    feedbackClearTimer.stop()
+    feedback = message
+    feedbackIsError = true
+  }
+
   function runAction(action, profileId) {
     if (actionProcess.running) return
     busy = true
-    feedback = ""
+    pendingAction = action
+    pendingProfile = profileId || ""
+    clearFeedback()
     actionProcess.command = [controlPath, "--config", configFile, action]
     if (profileId) actionProcess.command.push(profileId)
     actionProcess.running = true
@@ -84,7 +108,7 @@ Panel {
 
   onOpenedChanged: if (opened) {
     cursorActive = false
-    feedback = ""
+    clearFeedback()
     refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -105,6 +129,16 @@ Panel {
     onTriggered: root.refresh()
   }
 
+  Timer {
+    id: feedbackClearTimer
+    interval: 3500
+    repeat: false
+    onTriggered: {
+      root.feedback = ""
+      root.feedbackIsError = false
+    }
+  }
+
   Process {
     id: statusProcess
     running: false
@@ -116,8 +150,15 @@ Panel {
           var parsed = JSON.parse(String(text || ""))
           if (parsed && typeof parsed === "object") root.status = parsed
         } catch (e) {
-          root.feedback = "Could not read runtime status"
+          root.showError("Could not read runtime status")
         }
+      }
+    }
+    stderr: StdioCollector { id: statusError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        var details = String(statusError.text || "Could not read runtime status").trim()
+        root.showError(details.length > 180 ? details.slice(0, 177) + "…" : details)
       }
     }
   }
@@ -125,9 +166,23 @@ Panel {
   Process {
     id: actionProcess
     running: false
+    stdout: StdioCollector { id: actionOutput; waitForEnd: true }
+    stderr: StdioCollector { id: actionError; waitForEnd: true }
     onExited: function(exitCode) {
       root.busy = false
-      root.feedback = exitCode === 0 ? "" : "Runtime action failed"
+      if (exitCode === 0) {
+        var successMessage = "Runtime updated"
+        if (root.pendingAction === "start") {
+          successMessage = root.pendingProfile !== "" ? root.pendingProfile + " started" : "Local AI started"
+        } else if (root.pendingAction === "stop") successMessage = "Local AI stopped"
+        else if (root.pendingAction === "restart") successMessage = "Local AI restarted"
+        root.showTransientFeedback(successMessage)
+      } else {
+        var details = String(actionError.text || actionOutput.text || "Runtime action failed").trim()
+        root.showError(details.length > 180 ? details.slice(0, 177) + "…" : details)
+      }
+      root.pendingAction = ""
+      root.pendingProfile = ""
       actionRefresh.restart()
     }
   }
@@ -135,13 +190,16 @@ Panel {
   Process {
     id: copyProcess
     running: false
-    onExited: function(exitCode) { root.feedback = exitCode === 0 ? "Endpoint copied" : "Could not copy endpoint" }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.showTransientFeedback("Endpoint copied")
+      else root.showError("Could not copy endpoint")
+    }
   }
 
   Process {
     id: openConfigProcess
     running: false
-    onExited: function(exitCode) { if (exitCode !== 0) root.feedback = "Could not open config" }
+    onExited: function(exitCode) { if (exitCode !== 0) root.showError("Could not open config") }
   }
 
   IpcHandler {
@@ -163,7 +221,7 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: "󰍛"
-    tooltipText: "llama.cpp Local AI"
+    tooltipText: "Local AI"
     active: root.running
     useActiveColor: false
 
@@ -222,7 +280,7 @@ Panel {
 
           PanelHero {
             width: parent.width
-            title: "llama.cpp Local AI"
+            title: "Local AI"
             meta: String(root.status.backend || "LOCAL RUNTIME").toUpperCase()
             foreground: root.foreground
             fontFamily: root.fontFamily
@@ -403,7 +461,7 @@ Panel {
           Text {
             width: parent.width
             text: root.feedback !== "" ? root.feedback : String(root.status.endpoint || "")
-            color: root.dim
+            color: root.feedbackIsError ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             horizontalAlignment: Text.AlignHCenter

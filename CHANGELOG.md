@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 — 2026-08-27
+
+- Use the concise, machine-independent `Local AI` title while keeping the
+  llama.cpp runtime scope explicit in descriptions and documentation
+- Add complete public installation, prerequisite, security, and removal guidance
+- Surface concrete runtime and systemd errors in the panel
+- Clear successful action feedback automatically after a short delay while keeping errors visible
+- Validate configured systemd user service names and harden systemctl argument handling
+- Make `doctor` fail clearly when its configuration file is missing
+- Add GitHub Actions validation and a release checklist
+
 ## 0.4.0
 
 - Rename the user-facing plugin to llama.cpp Local AI while retaining its
