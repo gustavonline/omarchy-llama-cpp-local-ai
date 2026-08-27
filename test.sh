@@ -7,15 +7,15 @@ jq -e '
   .schemaVersion == 1 and
   .id == "io.github.gustavonline.local-ai" and
   .name == "Local AI" and
-  .version == "0.5.0" and
+  .version == "0.5.1" and
   (.kinds | index("bar-widget")) != null and
   .entryPoints.barWidget == "Panel.qml"
 ' "$plugin_dir/manifest.json" >/dev/null
 
 bash -n "$plugin_dir/local-ai-control"
-rg -q 'id: feedbackClearTimer' "$plugin_dir/Panel.qml"
-rg -q 'function showTransientFeedback\(message\)' "$plugin_dir/Panel.qml"
-rg -q 'showTransientFeedback\("Endpoint copied"\)' "$plugin_dir/Panel.qml"
+grep -qE 'id: feedbackClearTimer' "$plugin_dir/Panel.qml"
+grep -qE 'function showTransientFeedback\(message\)' "$plugin_dir/Panel.qml"
+grep -qE 'showTransientFeedback\("Endpoint copied"\)' "$plugin_dir/Panel.qml"
 "$plugin_dir/local-ai-control" --config "$plugin_dir/local-ai.example.toml" status | jq -e '
   (.profile | type == "string") and
   (.state | type == "string") and

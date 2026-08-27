@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 — 2026-08-27
+
+- Make standalone validation portable to clean GitHub Actions runners
+
 ## 0.5.0 — 2026-08-27
 
 - Use the concise, machine-independent `Local AI` title while keeping the
