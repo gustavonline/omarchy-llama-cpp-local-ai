@@ -7,12 +7,17 @@ jq -e '
   .schemaVersion == 1 and
   .id == "io.github.gustavonline.local-ai" and
   .name == "Local AI" and
-  .version == "0.5.1" and
+  .version == "0.6.0" and
   (.kinds | index("bar-widget")) != null and
   .entryPoints.barWidget == "Panel.qml"
 ' "$plugin_dir/manifest.json" >/dev/null
 
 bash -n "$plugin_dir/local-ai-control"
+python3 -m py_compile "$plugin_dir/local-ai-copilot"
+for file in "$plugin_dir/local-ai-control" "$plugin_dir/local-ai-copilot" "$plugin_dir/test.sh" \
+  "$plugin_dir/tests/fake-pi" "$plugin_dir/tests/fake-hyprctl" "$plugin_dir/tests/fake-systemctl"; do
+  [[ -x $file ]] || { printf 'Expected executable: %s\n' "$file" >&2; exit 1; }
+done
 grep -qE 'id: feedbackClearTimer' "$plugin_dir/Panel.qml"
 grep -qE 'function showTransientFeedback\(message\)' "$plugin_dir/Panel.qml"
 grep -qE 'showTransientFeedback\("Endpoint copied"\)' "$plugin_dir/Panel.qml"
@@ -35,7 +40,12 @@ grep -qE 'showTransientFeedback\("Endpoint copied"\)' "$plugin_dir/Panel.qml"
 # A fake systemctl keeps this test self-contained and prevents it from
 # starting a real model during validation.
 test_root=$(mktemp -d)
-trap 'rm -rf -- "$test_root"' EXIT
+server_pid=""
+cleanup() {
+  if [[ -n $server_pid ]]; then kill "$server_pid" >/dev/null 2>&1 || true; fi
+  rm -rf -- "$test_root"
+}
+trap cleanup EXIT
 mkdir -p "$test_root/bin"
 touch "$test_root/model-Q8_0.gguf"
 cat >"$test_root/config.toml" <<'EOF'
@@ -87,8 +97,65 @@ if "$plugin_dir/local-ai-control" --config "$test_root/invalid.toml" status >/de
   exit 1
 fi
 
+# Exercise the optional Copilot subsystem independently from the runtime
+# controller. All model, Hyprland, Pi, and systemd dependencies are fake.
+copilot_root="$test_root/copilot"
+mkdir -p "$copilot_root"
+port_file="$copilot_root/port"
+python3 "$plugin_dir/tests/fake-openai-server.py" "$port_file" &
+server_pid=$!
+for _ in $(seq 1 50); do [[ -s $port_file ]] && break; sleep 0.05; done
+[[ -s $port_file ]]
+port=$(<"$port_file")
+
+copilot_config="$copilot_root/config.toml"
+sed \
+  -e "s#http://127.0.0.1:8080/v1#http://127.0.0.1:${port}/v1#" \
+  -e 's#command = \["pi-worker", "--thinking", "low", "--no-web", "--"\]#command = []#' \
+  -e "s#~/.config/omarchy/local-ai-copilot-playbook.json#${copilot_root}/playbook.json#" \
+  "$plugin_dir/local-ai-copilot.example.toml" >"$copilot_config"
+
+export LOCAL_AI_COPILOT_STATE_DIR="$copilot_root/state"
+export LOCAL_AI_COPILOT_PI_DIR="$copilot_root/pi"
+export LOCAL_AI_COPILOT_UNIT_DIR="$copilot_root/units"
+export LOCAL_AI_COPILOT_PI="$plugin_dir/tests/fake-pi"
+export LOCAL_AI_COPILOT_HYPRCTL="$plugin_dir/tests/fake-hyprctl"
+export LOCAL_AI_COPILOT_SYSTEMCTL="$plugin_dir/tests/fake-systemctl"
+
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" doctor --online | jq -e '
+  .ok and .checks.runtime.ok and (.checks.runtime.detail | contains("32768 tokens"))
+' >/dev/null
+jq -e '
+  .providers["copilot-local"].models[0] |
+  .id == "test-local-model" and .contextWindow == 32768 and .maxTokens == 512
+' "$copilot_root/pi/models.json" >/dev/null
+
+context='{"appId":"org.example.App","title":"Example document","workspace":"1"}'
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" evaluate --context-json "$context" | jq -e '
+  .title == "Prepare the next step" and .confidence == 0.91
+' >/dev/null
+jq -e '.id and .context.appId == "org.example.App"' "$copilot_root/state/suggestion.json" >/dev/null
+
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" remember >/dev/null
+jq -e '.version == 1 and (.rules | length) == 1' "$copilot_root/playbook.json" >/dev/null
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" test-suggestion >/dev/null
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" dismiss >/dev/null
+jq -e 'length == 0' "$copilot_root/state/suggestion.json" >/dev/null
+
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" render-service | grep -Fq 'NoNewPrivileges=yes'
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" render-service | grep -Fq 'ProtectHome=read-only'
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" install-service >/dev/null
+[[ -f $copilot_root/units/omarchy-local-ai-copilot.service ]]
+
+rg -q 'id: suggestionWindow' "$plugin_dir/Panel.qml"
+rg -q 'text: "ALWAYS-ON COPILOT"' "$plugin_dir/Panel.qml"
+rg -q 'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' "$plugin_dir/Panel.qml"
+rg -q -- '--no-tools' "$plugin_dir/local-ai-copilot"
+rg -q -- '--no-skills' "$plugin_dir/local-ai-copilot"
+rg -q -- '--no-context-files' "$plugin_dir/local-ai-copilot"
+
 if command -v omarchy >/dev/null; then
   omarchy plugin validate "$plugin_dir" >/dev/null
 fi
 
-printf 'Standalone Local AI plugin checks passed\n'
+printf 'Local AI runtime and Copilot checks passed\n'

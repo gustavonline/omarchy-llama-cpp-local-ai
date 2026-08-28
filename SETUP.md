@@ -1,6 +1,6 @@
 # Coding-agent setup contract
 
-Use this workflow when installing the plugin or adding a model. Keep the
+Use this workflow when installing the plugin or adding a model. Keep the runtime
 architecture to three layers:
 
 1. A GGUF model and any matching draft model.
@@ -57,3 +57,26 @@ The service is the source of truth. The plugin reads `--model`,
 
 Harnesses such as Pi or Codex are separate clients. Configure them against the
 endpoint shown by the panel after the runtime has been verified.
+
+## Optional Copilot contract
+
+Copilot is a fourth, optional consumer of the endpoint, not another runtime
+profile and not another Omarchy plugin. Configure it from the **Always-on
+Copilot** section in the Local AI dropdown.
+
+1. Install Pi and verify the desired light model endpoint.
+2. Open **Copilot settings** and set `runtime.endpoint` plus either an exact
+   served model ID or `model = "auto"`.
+3. If the endpoint should be started automatically, configure a fixed
+   `runtime.start_command` argv that invokes `local-ai-control start PROFILE`.
+4. Keep screenshots disabled. Adjust privacy deny rules before widening shared
+   window metadata.
+5. Configure delegation only as a fixed argv. It is launched in a visible
+   terminal after an explicit click; it is never a tool granted to the light
+   model.
+6. Run `local-ai-copilot doctor --online`, test a synthetic suggestion, then
+   enable the observer.
+
+The Copilot systemd service owns only its observer, state, isolated Pi catalog,
+and suggestion UI. Disabling it must not stop or rewrite the shared model
+runtime.

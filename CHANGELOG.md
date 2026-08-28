@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 — 2026-08-28
+
+- Add the opt-in always-on local Copilot inside the existing Local AI dropdown
+  instead of creating a second Omarchy plugin or menubar icon
+- Add an event-driven, privacy-filtered Hyprland observer backed by a minimal
+  isolated Pi session and a configurable local OpenAI-compatible endpoint
+- Add non-focus-stealing bottom-right suggestions with dismiss, copy, remember,
+  and explicit optional heavy-harness delegation actions
+- Add private machine-local Copilot settings, editable playbook memory,
+  metadata-only audit logs, confidence/cooldown limits, and a hardened systemd
+  user service
+- Preserve the existing runtime-profile controller and endpoint workflow as an
+  independent subsystem inside the same plugin
+
 ## 0.5.1 — 2026-08-27
 
 - Make standalone validation portable to clean GitHub Actions runners
