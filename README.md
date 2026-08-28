@@ -49,9 +49,11 @@ with:
 
 ## Optional always-on Copilot
 
-The **Always-on Copilot** section lives in the same Local AI dropdown. It is off
-by default. Clicking **Set up Copilot** creates a private machine-local settings
-file and opens it for editing; **Turn Copilot on** then enables a hardened
+The **Always-on Copilot** section appears first in the same Local AI dropdown.
+It is off by default and uses one persistent toggle. The adjacent settings page
+discovers compatible models from active local Ollama and llama.cpp endpoints,
+lets the user choose suggestion frequency and window-title sharing, and saves a
+private machine-local configuration. Turning the toggle on enables a hardened
 systemd user service that starts after graphical login.
 
 The first version is deliberately light and quiet:
@@ -69,7 +71,8 @@ The first version is deliberately light and quiet:
   release.
 
 Copilot configuration is stored in
-`~/.config/omarchy/local-ai-copilot.toml`; its editable playbook defaults to
+`~/.config/omarchy/local-ai-copilot.toml`. **Open advanced config** exposes the
+full TOML for unusual startup/delegation/privacy settings; its editable playbook defaults to
 `~/.config/omarchy/local-ai-copilot-playbook.json`. See the annotated
 [`local-ai-copilot.example.toml`](local-ai-copilot.example.toml).
 
@@ -122,7 +125,7 @@ Copilot does not reserve the endpoint for itself.
 - Right-click: start the default profile or stop the active profile
 - Middle-click: restart the active profile
 - Panel buttons: switch profile, start, stop, restart, copy URL, or edit profiles
-- Same panel: set up, enable, pause, test, restart, or disable Copilot
+- Same panel: toggle Copilot and open its dedicated settings page
 
 ## Verification
 

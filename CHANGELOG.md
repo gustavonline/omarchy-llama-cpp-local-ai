@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 — 2026-08-28
+
+- Simplify the main panel around one always-on Copilot toggle and one settings
+  action, removing pause, restart, playbook, and test controls from the normal UI
+- Put Copilot first and keep runtime profiles, endpoint actions, and model
+  controls together in the lower Local AI section
+- Add a Local Transcript-inspired settings page with back navigation, native
+  model/frequency dropdowns, window-title privacy toggle, and save feedback
+- Discover compatible models from active local Ollama and llama.cpp endpoints
+  and identify the smallest available model for the lightweight Copilot
+- Preserve the advanced TOML editor for uncommon endpoint, startup, delegation,
+  privacy, and rate-limit configuration
+
 ## 0.6.0 — 2026-08-28
 
 - Add the opt-in always-on local Copilot inside the existing Local AI dropdown

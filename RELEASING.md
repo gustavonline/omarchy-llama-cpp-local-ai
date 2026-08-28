@@ -7,5 +7,5 @@
    suggestion-card actions, and error-display behavior.
 4. Confirm the repository contains no models, API keys, local TOML files,
    machine-specific services, Copilot settings/playbooks, or hardware tuning.
-5. Merge to `main`, tag the manifest version (for example `v0.6.0`), and create a
+5. Merge to `main`, tag the manifest version (for example `v0.7.0`), and create a
    GitHub Release from the matching changelog section.

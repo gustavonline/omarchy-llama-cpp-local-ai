@@ -222,6 +222,37 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
+def toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    raise ConfigError(f"unsupported settings value: {type(value).__name__}")
+
+
+def render_config(config: dict[str, dict[str, Any]]) -> str:
+    lines = ["# Local AI Copilot settings. Advanced values may also be edited directly.", ""]
+    for table in DEFAULTS:
+        lines.append(f"[{table}]")
+        for key in DEFAULTS[table]:
+            lines.append(f"{key} = {toml_value(config[table][key])}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def save_config(path: Path, config: dict[str, dict[str, Any]]) -> None:
+    ensure_private_dir(path.parent)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(render_config(config), encoding="utf-8")
+    temporary.chmod(0o600)
+    load_config(temporary)
+    temporary.replace(path)
+
+
 def read_json(path: Path, fallback: Any) -> Any:
     try:
         with path.open(encoding="utf-8") as handle:
@@ -296,6 +327,143 @@ def first_value(row: dict[str, Any], paths: list[tuple[str, ...]]) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def model_parameter_billions(model_id: str) -> float:
+    match = re.search(r"(?:^|[-_:])(\d+(?:\.\d+)?)b(?:[-_:]|$)", model_id, re.IGNORECASE)
+    return float(match.group(1)) if match else 9999.0
+
+
+def friendly_model_name(model_id: str) -> str:
+    label = model_id.replace(":", " ").replace("-local", "").replace("-", " ")
+    label = re.sub(r"\bqwen(?=\d)", "Qwen ", label, flags=re.IGNORECASE)
+    label = re.sub(r"\bqwen\b", "Qwen", label, flags=re.IGNORECASE)
+    label = re.sub(r"\binstruct\b", "Instruct", label, flags=re.IGNORECASE)
+    label = re.sub(r"(\d+(?:\.\d+)?)b\b", r"\1B", label, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", label).strip()
+
+
+def endpoint_model_rows(endpoint: str, timeout: float = 0.8) -> list[dict[str, Any]]:
+    request = urllib.request.Request(endpoint.rstrip("/") + "/models", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return model_rows(json.load(response))
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+
+
+def setup_payload(config_path: Path) -> dict[str, Any]:
+    try:
+        config = load_config(config_path)
+        configured = True
+        config_error = ""
+    except ConfigError as error:
+        config = load_config(config_path, require=False)
+        configured = False
+        config_error = str(error)
+
+    current_endpoint = str(config["runtime"]["endpoint"])
+    current_model = str(config["runtime"]["model"])
+    endpoints = list(dict.fromkeys([
+        current_endpoint,
+        "http://127.0.0.1:11434/v1",
+        "http://127.0.0.1:8080/v1",
+    ]))
+    choices: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        provider = "Ollama" if urllib.parse.urlparse(endpoint).port == 11434 else "llama.cpp"
+        for row in endpoint_model_rows(endpoint):
+            model_id = str(first_value(row, [("id",), ("model",), ("name",)]) or "").strip()
+            if not model_id:
+                continue
+            value = endpoint.rstrip("/") + "|" + model_id
+            if value in seen:
+                continue
+            seen.add(value)
+            choices.append({
+                "value": value,
+                "endpoint": endpoint.rstrip("/"),
+                "model": model_id,
+                "label": friendly_model_name(model_id),
+                "description": provider,
+                "billions": model_parameter_billions(model_id),
+            })
+
+    selected_value = current_endpoint.rstrip("/") + "|" + current_model
+    if selected_value not in seen:
+        choices.append({
+            "value": selected_value,
+            "endpoint": current_endpoint,
+            "model": current_model,
+            "label": friendly_model_name(current_model),
+            "description": "Configured endpoint",
+            "billions": model_parameter_billions(current_model),
+        })
+    choices.sort(key=lambda item: (float(item["billions"]), str(item["label"]).lower()))
+    if current_model == "auto" and choices:
+        selected_value = str(choices[0]["value"])
+    if choices:
+        smallest = min(float(item["billions"]) for item in choices)
+        for item in choices:
+            if float(item["billions"]) == smallest and smallest < 9999:
+                item["description"] += " · Fastest available"
+                break
+
+    return {
+        "configured": configured,
+        "configError": config_error,
+        "config": {
+            "modelChoice": selected_value,
+            "endpoint": current_endpoint,
+            "model": current_model,
+            "minimumConfidence": float(config["observer"]["minimum_confidence"]),
+            "shareWindowTitle": bool(config["privacy"]["share_window_title"]),
+        },
+        "modelChoices": choices,
+    }
+
+
+def configure_from_ui(
+    config_path: Path,
+    model_choice: str,
+    confidence_text: str,
+    share_title_text: str,
+) -> None:
+    if "|" not in model_choice:
+        raise ConfigError("choose an available local model")
+    endpoint, model_id = model_choice.rsplit("|", 1)
+    endpoint = endpoint.rstrip("/")
+    model_id = model_id.strip()
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ConfigError("Copilot settings only accept a local loopback endpoint")
+    if not model_id or len(model_id) > 200 or any(character in model_id for character in "\n\r\x00"):
+        raise ConfigError("model id is invalid")
+    try:
+        confidence = float(confidence_text)
+    except ValueError as error:
+        raise ConfigError("suggestion sensitivity is invalid") from error
+    if confidence not in {0.62, 0.72, 0.82}:
+        raise ConfigError("suggestion sensitivity is invalid")
+    if share_title_text not in {"true", "false"}:
+        raise ConfigError("window-title setting is invalid")
+
+    config = load_config(config_path, require=False)
+    previous_endpoint = str(config["runtime"]["endpoint"]).rstrip("/")
+    config["runtime"]["endpoint"] = endpoint
+    config["runtime"]["model"] = model_id
+    if parsed.port == 11434:
+        config["runtime"]["context_window"] = 32768
+    if endpoint != previous_endpoint:
+        config["runtime"]["start_command"] = []
+    config["observer"]["minimum_confidence"] = confidence
+    config["privacy"]["share_window_title"] = share_title_text == "true"
+    save_config(config_path, config)
+    if service_flag("is-active"):
+        result = systemctl("restart", UNIT_NAME)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "could not reload Copilot settings")
 
 
 def discover_runtime(config: dict[str, dict[str, Any]]) -> tuple[str, int]:
@@ -885,6 +1053,7 @@ def status_payload(config_path: Path) -> dict[str, Any]:
         "paused": is_paused(),
         "state": state,
         "model": str(daemon.get("model") or config["runtime"]["model"]),
+        "modelLabel": friendly_model_name(str(daemon.get("model") or config["runtime"]["model"])),
         "endpoint": config["runtime"]["endpoint"],
         "lastError": str(daemon.get("lastError") or config_error),
         "suggestionFile": str(SUGGESTION_FILE),
@@ -974,6 +1143,11 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("LOCAL_AI_COPILOT_CONFIG", DEFAULT_CONFIG)))
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
+    subparsers.add_parser("setup-state")
+    configure_parser = subparsers.add_parser("configure")
+    configure_parser.add_argument("model_choice")
+    configure_parser.add_argument("minimum_confidence")
+    configure_parser.add_argument("share_window_title")
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--online", action="store_true")
     subparsers.add_parser("render-service")
@@ -999,6 +1173,16 @@ def main() -> int:
     try:
         if args.command == "status":
             print(json.dumps(status_payload(config_path), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "setup-state":
+            print(json.dumps(setup_payload(config_path), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "configure":
+            configure_from_ui(
+                config_path,
+                args.model_choice,
+                args.minimum_confidence,
+                args.share_window_title,
+            )
+            print("configured")
         elif args.command == "doctor":
             result = doctor(config_path, args.online)
             print(json.dumps(result, ensure_ascii=False, indent=2))

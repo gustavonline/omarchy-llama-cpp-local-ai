@@ -64,17 +64,20 @@ Copilot is a fourth, optional consumer of the endpoint, not another runtime
 profile and not another Omarchy plugin. Configure it from the **Always-on
 Copilot** section in the Local AI dropdown.
 
-1. Install Pi and verify the desired light model endpoint.
-2. Open **Copilot settings** and set `runtime.endpoint` plus either an exact
-   served model ID or `model = "auto"`.
-3. If the endpoint should be started automatically, configure a fixed
+1. Install Pi and start the desired light-model endpoint.
+2. Open **Copilot settings**. Choose one of the locally discovered models; the
+   smallest available model is identified as the fastest option.
+3. Choose the suggestion frequency and whether filtered window titles may be
+   shared with the local model, then save.
+4. If the endpoint should be started automatically, use **Open advanced config**
+   to configure a fixed
    `runtime.start_command` argv that invokes `local-ai-control start PROFILE`.
-4. Keep screenshots disabled. Adjust privacy deny rules before widening shared
+5. Keep screenshots disabled. Adjust privacy deny rules before widening shared
    window metadata.
-5. Configure delegation only as a fixed argv. It is launched in a visible
+6. Configure delegation only as a fixed argv. It is launched in a visible
    terminal after an explicit click; it is never a tool granted to the light
    model.
-6. Run `local-ai-copilot doctor --online`, test a synthetic suggestion, then
+7. Run `local-ai-copilot doctor --online`, test a synthetic suggestion, then
    enable the observer.
 
 The Copilot systemd service owns only its observer, state, isolated Pi catalog,

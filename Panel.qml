@@ -50,6 +50,7 @@ Panel {
   property string pendingAction: ""
   property string pendingProfile: ""
   property bool cursorActive: false
+  property bool settingsPage: false
   property var copilotStatus: ({
     configured: false, configError: "", enabled: false, active: false, paused: false,
     state: "disabled", model: "auto", endpoint: "", lastError: "",
@@ -62,6 +63,15 @@ Panel {
   property bool copilotFeedbackIsError: false
   property string copilotPendingAction: ""
   property double clockMs: Date.now()
+  property string selectedModelChoice: ""
+  property string selectedConfidence: "0.72"
+  property bool selectedShareWindowTitle: true
+  property var copilotModelOptions: []
+  readonly property var confidenceOptions: [
+    { value: "0.82", label: "Quiet", description: "Only very high-confidence suggestions" },
+    { value: "0.72", label: "Balanced", description: "Recommended" },
+    { value: "0.62", label: "More proactive", description: "More suggestions, including weaker ones" }
+  ]
 
   readonly property bool running: status.state === "active"
   readonly property bool failed: status.state === "failed"
@@ -174,7 +184,42 @@ Panel {
     copilotPendingAction = action
     clearCopilotFeedback()
     copilotActionProcess.command = [copilotControlPath, "--config", copilotConfigFile, action]
+    if (action === "configure") {
+      copilotActionProcess.command.push(selectedModelChoice)
+      copilotActionProcess.command.push(selectedConfidence)
+      copilotActionProcess.command.push(selectedShareWindowTitle ? "true" : "false")
+    }
     copilotActionProcess.running = true
+  }
+
+  function refreshCopilotSetup() {
+    if (!copilotSetupProcess.running) copilotSetupProcess.running = true
+  }
+
+  function applyCopilotSetup(value) {
+    if (!value || typeof value !== "object") return
+    var config = value.config || {}
+    copilotModelOptions = Array.isArray(value.modelChoices) ? value.modelChoices : []
+    selectedModelChoice = String(config.modelChoice || "")
+    selectedConfidence = Number(config.minimumConfidence || 0.72).toFixed(2)
+    selectedShareWindowTitle = config.shareWindowTitle === undefined
+      ? true : Boolean(config.shareWindowTitle)
+  }
+
+  function saveCopilotSetup() {
+    if (selectedModelChoice === "") {
+      showCopilotError("Choose a local Copilot model")
+      return
+    }
+    runCopilotAction("configure")
+  }
+
+  function currentCopilotModelLabel() {
+    var selected = copilotModelOptions.find(function(option) {
+      return String(option.value || "") === selectedModelChoice
+    })
+    return selected ? String(selected.label || selected.model || "Local model")
+      : String(copilotStatus.modelLabel || copilotStatus.model || "Local model")
   }
 
   function applyCopilotStatus(value) {
@@ -205,6 +250,7 @@ Panel {
     if (action === "test-suggestion") return "Test suggestion shown"
     if (action === "restart") return "Copilot restarted"
     if (action === "edit-settings") return "Copilot settings opened"
+    if (action === "configure") return "Copilot settings saved"
     return "Copilot updated"
   }
 
@@ -213,6 +259,7 @@ Panel {
     clearFeedback()
     clearCopilotFeedback()
     refresh()
+    if (settingsPage) refreshCopilotSetup()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -362,6 +409,29 @@ Panel {
   }
 
   Process {
+    id: copilotSetupProcess
+    running: false
+    command: [root.copilotControlPath, "--config", root.copilotConfigFile, "setup-state"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          root.applyCopilotSetup(JSON.parse(String(text || "{}")))
+        } catch (error) {
+          root.showCopilotError("Could not read Copilot settings")
+        }
+      }
+    }
+    stderr: StdioCollector { id: copilotSetupError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        var detail = String(copilotSetupError.text || "Could not read Copilot settings").trim()
+        root.showCopilotError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
+      }
+    }
+  }
+
+  Process {
     id: copilotActionProcess
     running: false
     stdout: StdioCollector { id: copilotActionOutput; waitForEnd: true }
@@ -372,6 +442,10 @@ Panel {
       else {
         var detail = String(copilotActionError.text || copilotActionOutput.text || "Copilot action failed").trim()
         root.showCopilotError(detail.length > 220 ? detail.slice(0, 217) + "…" : detail)
+      }
+      if (exitCode === 0 && root.copilotPendingAction === "configure") {
+        root.settingsPage = false
+        root.refreshCopilotSetup()
       }
       root.copilotPendingAction = ""
       copilotActionRefresh.restart()
@@ -432,381 +506,393 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(390))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(700))
+    contentWidth: panel.fittedContentWidth(Style.space(420))
+    contentHeight: panel.fittedContentHeight(
+      contentColumn.implicitHeight,
+      root.settingsPage ? Style.space(640) : Style.space(680)
+    )
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: modelDropdown.popupOpen || sensitivityDropdown.popupOpen
       onActivateRequested: root.refresh()
       onCloseRequested: root.close()
-      onTextKey: function(t) {
-        if (t === "r" || t === "R") root.runAction("restart", "")
-        if (t === "s" || t === "S") root.runAction(root.running ? "stop" : "start", "")
-        if (t === "c" || t === "C") root.runCopilotAction(root.copilotEnabled ? "disable" : "enable")
-      }
 
       Flickable {
+        id: panelContent
         anchors.fill: parent
         contentWidth: width
-        contentHeight: content.implicitHeight
+        contentHeight: contentColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
+        bottomMargin: Style.space(12)
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
-          id: content
-          width: parent.width
+          id: contentColumn
+          width: panelContent.width
           spacing: Style.space(12)
 
-          PanelHero {
+          Item {
             width: parent.width
-            title: "Local AI"
-            meta: String(root.status.backend || "LOCAL RUNTIME").toUpperCase()
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            iconComponent: Component {
+            implicitHeight: Math.max(titleBlock.implicitHeight, settingsButton.implicitHeight)
+
+            Column {
+              id: titleBlock
+              anchors.left: parent.left
+              anchors.right: settingsButton.left
+              anchors.rightMargin: Style.space(8)
+              spacing: Style.space(2)
+
               Text {
-                text: "󰍛"
+                width: parent.width
+                text: root.settingsPage ? "Copilot settings" : "Local AI"
                 color: root.foreground
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.display
+                font.pixelSize: Style.font.title
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                visible: !root.settingsPage
+                text: (root.copilotEnabled ? "Copilot on" : "Copilot off")
+                  + " · " + (root.running ? "Runtime running" : "Runtime stopped")
+                color: root.copilotEnabled ? root.accent : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            PanelActionButton {
+              id: settingsButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: root.settingsPage ? "󰁍" : "󰒓"
+              tooltipText: root.settingsPage ? "Back" : "Copilot settings"
+              foreground: root.foreground
+              hoverColor: root.accent
+              fontFamily: root.fontFamily
+              bordered: true
+              focusable: true
+              onClicked: {
+                root.settingsPage = !root.settingsPage
+                root.clearCopilotFeedback()
+                if (root.settingsPage) root.refreshCopilotSetup()
+                else root.refresh()
               }
             }
           }
 
-          Item {
-            width: parent.width
-            implicitHeight: Math.max(activeName.implicitHeight, activeState.implicitHeight)
-
-            Text {
-              id: activeName
-              anchors.left: parent.left
-              anchors.right: activeState.left
-              anchors.rightMargin: Style.spacing.md
-              anchors.verticalCenter: parent.verticalCenter
-              text: String(root.status.model || root.status.label || "Stopped")
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-              elide: Text.ElideRight
-            }
-
-            Text {
-              id: activeState
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.stateLabel
-              color: root.failed ? Color.urgent : (root.running ? root.foreground : root.dim)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-          }
-
-          Text {
-            width: parent.width
-            text: root.activeDetail()
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
-          PanelSectionHeader {
+          Column {
+            visible: !root.settingsPage
             width: parent.width
-            text: "RUNTIME PROFILES"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
+            spacing: Style.space(10)
 
-          Grid {
-            id: profileGrid
-            width: parent.width
-            columns: Math.max(1, Math.min(3, (root.status.profiles || []).length))
-            spacing: Style.spacing.md
-            readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
+            PanelSectionHeader {
+              width: parent.width
+              text: "ALWAYS-ON COPILOT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
 
-            Repeater {
-              model: root.status.profiles || []
+            Toggle {
+              width: parent.width
+              label: "Always-on Copilot"
+              description: !root.copilotStatus.configured
+                ? "Open settings to choose a small local model"
+                : root.currentCopilotModelLabel() + " · " + root.copilotStateLabel
+              checked: root.copilotEnabled
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              enabled: root.copilotStatus.configured && !root.copilotBusy
+              onClicked: root.runCopilotAction(root.copilotEnabled ? "disable" : "enable")
+            }
+
+            Text {
+              visible: root.copilotFeedback !== "" || root.copilotFailed
+              width: parent.width
+              text: root.copilotFeedback !== ""
+                ? root.copilotFeedback
+                : String(root.copilotStatus.lastError || "")
+              color: root.copilotFeedbackIsError || root.copilotFailed ? root.urgent : root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+
+            PanelSeparator { width: parent.width; foreground: root.foreground }
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "LOCAL MODEL RUNTIME"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(runtimeName.implicitHeight, runtimeState.implicitHeight)
+
+              Text {
+                id: runtimeName
+                anchors.left: parent.left
+                anchors.right: runtimeState.left
+                anchors.rightMargin: Style.spacing.md
+                anchors.verticalCenter: parent.verticalCenter
+                text: String(root.status.model || root.status.label || "No model running")
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                id: runtimeState
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.stateLabel
+                color: root.failed ? root.urgent : (root.running ? root.accent : root.dim)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: root.activeDetail()
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Grid {
+              id: profileGrid
+              width: parent.width
+              columns: Math.max(1, Math.min(3, (root.status.profiles || []).length))
+              spacing: Style.spacing.md
+              readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
+
+              Repeater {
+                model: root.status.profiles || []
+
+                Button {
+                  required property var modelData
+                  width: profileGrid.cellWidth
+                  text: root.profileTitle(modelData)
+                  selected: root.status.profile === modelData.id
+                  enabled: !root.busy && modelData.ready === true
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: root.runAction("start", modelData.id)
+                }
+              }
+            }
+
+            Text {
+              visible: (root.status.profiles || []).length === 0
+              width: parent.width
+              text: "No runtime profiles configured"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.spacing.md
+              readonly property real cellWidth: (width - spacing) / 2
 
               Button {
-                required property var modelData
-                width: profileGrid.cellWidth
-                text: root.profileTitle(modelData)
-                selected: root.status.profile === modelData.id
-                enabled: !root.busy && modelData.ready === true
+                width: parent.cellWidth
+                text: root.running ? "Stop runtime" : "Start " + String(root.status.defaultProfile || "default")
+                enabled: !root.busy && (root.running || root.status.defaultProfile !== "")
                 bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 fontSize: Style.font.bodySmall
                 verticalPadding: Style.spacing.controlPaddingY
-                onClicked: root.runAction("start", modelData.id)
+                onClicked: root.runAction(root.running ? "stop" : "start", "")
+              }
+
+              Button {
+                width: parent.cellWidth
+                text: "Restart"
+                enabled: !root.busy && root.running
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                verticalPadding: Style.spacing.controlPaddingY
+                onClicked: root.runAction("restart", "")
               }
             }
-          }
 
-          Text {
-            visible: (root.status.profiles || []).length === 0
-            width: parent.width
-            text: "No runtime profiles configured"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            horizontalAlignment: Text.AlignHCenter
-          }
+            Row {
+              width: parent.width
+              spacing: Style.spacing.md
+              readonly property real cellWidth: (width - spacing) / 2
 
-          Text {
-            visible: (root.status.profiles || []).length > 0
-            width: parent.width
-            text: (root.status.profiles || []).length + " profiles · "
-              + (root.status.profiles || []).filter(function(profile) { return profile.ready === true }).length
-              + " ready"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            horizontalAlignment: Text.AlignHCenter
-          }
+              Button {
+                width: parent.cellWidth
+                text: "Copy endpoint"
+                enabled: String(root.status.endpoint || "") !== ""
+                bordered: false
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                verticalPadding: Style.spacing.controlPaddingY
+                onClicked: root.copyEndpoint()
+              }
 
-          Row {
-            width: parent.width
-            spacing: Style.spacing.md
-            readonly property real cellWidth: (width - spacing) / 2
-
-            Button {
-              width: parent.cellWidth
-              text: root.running ? "Stop" : "Start " + String(root.status.defaultProfile || "default")
-              enabled: !root.busy && (root.running || root.status.defaultProfile !== "")
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runAction(root.running ? "stop" : "start", "")
-            }
-
-            Button {
-              width: parent.cellWidth
-              text: "Restart"
-              enabled: !root.busy && root.running
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runAction("restart", "")
-            }
-          }
-
-          PanelSeparator { width: parent.width; foreground: root.foreground }
-
-          PanelSectionHeader {
-            width: parent.width
-            text: "ALWAYS-ON COPILOT"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
-
-          Item {
-            width: parent.width
-            implicitHeight: Math.max(copilotName.implicitHeight, copilotState.implicitHeight)
-
-            Text {
-              id: copilotName
-              anchors.left: parent.left
-              anchors.right: copilotState.left
-              anchors.rightMargin: Style.spacing.md
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.copilotActive ? "Proactive local observer" : "Optional proactive suggestions"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-              elide: Text.ElideRight
+              Button {
+                width: parent.cellWidth
+                text: "Edit profiles"
+                enabled: String(root.status.configFile || root.configFile) !== ""
+                bordered: false
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                verticalPadding: Style.spacing.controlPaddingY
+                onClicked: root.openConfig()
+              }
             }
 
             Text {
-              id: copilotState
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.copilotStateLabel
-              color: root.copilotFailed ? root.urgent
-                : (root.copilotActive && !root.copilotPaused ? root.foreground : root.dim)
+              visible: root.feedback !== ""
+              width: parent.width
+              text: root.feedback
+              color: root.feedbackIsError ? root.urgent : root.accent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
             }
           }
 
-          Text {
+          Column {
+            visible: root.settingsPage
             width: parent.width
-            text: !root.copilotStatus.configured
-              ? String(root.copilotStatus.configError || "Create the machine-local Copilot settings")
-              : String(root.copilotStatus.model || "auto") + " · "
-                + String(root.copilotStatus.endpoint || "local endpoint")
-            color: root.copilotFailed ? root.urgent : root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
+            spacing: Style.space(10)
 
-          Row {
-            width: parent.width
-            spacing: Style.spacing.md
-            readonly property real cellWidth: (width - spacing) / 2
-
-            Button {
-              width: parent.cellWidth
-              text: root.copilotEnabled ? "Turn Copilot off" : "Turn Copilot on"
-              enabled: !root.copilotBusy && root.copilotStatus.configured
-              bordered: true
+            PanelSectionHeader {
+              width: parent.width
+              text: "MODEL"
               foreground: root.foreground
               fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runCopilotAction(root.copilotEnabled ? "disable" : "enable")
             }
 
-            Button {
-              width: parent.cellWidth
-              text: root.copilotPaused ? "Resume" : "Pause"
-              enabled: !root.copilotBusy && root.copilotEnabled
-              bordered: true
+            Dropdown {
+              id: modelDropdown
+              width: parent.width
+              label: "Copilot model"
+              value: root.selectedModelChoice
+              options: root.copilotModelOptions
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(value) { root.selectedModelChoice = value }
+            }
+
+            Text {
+              visible: root.copilotModelOptions.length === 0
+              width: parent.width
+              text: "No compatible local model endpoint is currently available."
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "SUGGESTIONS"
               foreground: root.foreground
               fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runCopilotAction(root.copilotPaused ? "resume" : "pause")
             }
-          }
 
-          Grid {
-            width: parent.width
-            columns: 2
-            spacing: Style.spacing.md
-            readonly property real cellWidth: (width - spacing) / 2
+            Dropdown {
+              id: sensitivityDropdown
+              width: parent.width
+              label: "Frequency"
+              value: root.selectedConfidence
+              options: root.confidenceOptions
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(value) { root.selectedConfidence = value }
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Use window titles"
+              description: "Share the filtered active-window title with the local model"
+              checked: root.selectedShareWindowTitle
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.selectedShareWindowTitle = !root.selectedShareWindowTitle
+            }
+
+            Text {
+              width: parent.width
+              text: "Local metadata only · no screenshots · no autonomous tools"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
 
             Button {
-              width: parent.cellWidth
-              text: root.copilotStatus.configured ? "Copilot settings" : "Set up Copilot"
+              width: parent.width
+              text: root.copilotBusy && root.copilotPendingAction === "configure" ? "Saving…" : "Save"
+              iconText: root.copilotBusy && root.copilotPendingAction === "configure" ? "󰦖" : "✓"
+              iconSpinning: root.copilotBusy && root.copilotPendingAction === "configure"
+              foreground: root.accent
+              accent: root.accent
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.copilotBusy && root.selectedModelChoice !== ""
+              onClicked: root.saveCopilotSetup()
+            }
+
+            Button {
+              width: parent.width
+              text: "Open advanced config"
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              bordered: false
               enabled: !root.copilotBusy
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
               onClicked: root.runCopilotAction("edit-settings")
             }
 
-            Button {
-              width: parent.cellWidth
-              text: "Edit playbook"
-              enabled: !root.copilotBusy && root.copilotStatus.configured
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runCopilotAction("open-playbook")
+            Text {
+              visible: root.copilotFeedback !== ""
+              width: parent.width
+              text: root.copilotFeedback
+              color: root.copilotFeedbackIsError ? root.urgent : root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
             }
 
-            Button {
-              width: parent.cellWidth
-              text: "Test suggestion"
-              enabled: !root.copilotBusy
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runCopilotAction("test-suggestion")
-            }
-
-            Button {
-              width: parent.cellWidth
-              text: "Restart Copilot"
-              enabled: !root.copilotBusy && root.copilotEnabled
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runCopilotAction("restart")
-            }
-          }
-
-          Text {
-            width: parent.width
-            text: "Window metadata only · no screenshots · no autonomous tools · isolated Pi session"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            width: parent.width
-            text: root.copilotFeedback !== ""
-              ? root.copilotFeedback
-              : String(root.copilotStatus.lastError || "")
-            visible: text !== ""
-            color: root.copilotFeedbackIsError || root.copilotFailed ? root.urgent : root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-          }
-
-          PanelSeparator { width: parent.width; foreground: root.foreground }
-
-          PanelSectionHeader {
-            width: parent.width
-            text: "RUNTIME SHORTCUTS"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.spacing.md
-            readonly property real cellWidth: (width - spacing) / 2
-
-            Button {
-              width: parent.cellWidth
-              text: "Copy URL"
-              enabled: String(root.status.endpoint || "") !== ""
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.copyEndpoint()
-            }
-
-            Button {
-              width: parent.cellWidth
-              text: "Edit profiles"
-              enabled: String(root.status.configFile || root.configFile) !== ""
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.openConfig()
-            }
-          }
-
-          Text {
-            width: parent.width
-            text: root.feedback !== "" ? root.feedback : String(root.status.endpoint || "")
-            color: root.feedbackIsError ? root.urgent : root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideMiddle
+            Item { width: 1; height: Style.space(8) }
           }
         }
       }

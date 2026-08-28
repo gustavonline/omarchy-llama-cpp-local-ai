@@ -7,7 +7,7 @@ jq -e '
   .schemaVersion == 1 and
   .id == "io.github.gustavonline.local-ai" and
   .name == "Local AI" and
-  .version == "0.6.0" and
+  .version == "0.7.0" and
   (.kinds | index("bar-widget")) != null and
   .entryPoints.barWidget == "Panel.qml"
 ' "$plugin_dir/manifest.json" >/dev/null
@@ -122,6 +122,20 @@ export LOCAL_AI_COPILOT_PI="$plugin_dir/tests/fake-pi"
 export LOCAL_AI_COPILOT_HYPRCTL="$plugin_dir/tests/fake-hyprctl"
 export LOCAL_AI_COPILOT_SYSTEMCTL="$plugin_dir/tests/fake-systemctl"
 
+model_choice="http://127.0.0.1:${port}/v1|test-local-model"
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" setup-state | jq -e \
+  --arg choice "$model_choice" '
+  .configured and (.modelChoices | map(.value) | index($choice)) != null
+' >/dev/null
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" configure \
+  "$model_choice" 0.82 false >/dev/null
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" setup-state | jq -e \
+  --arg choice "$model_choice" '
+  .config.modelChoice == $choice and
+  .config.minimumConfidence == 0.82 and
+  (.config.shareWindowTitle | not)
+' >/dev/null
+
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" doctor --online | jq -e '
   .ok and .checks.runtime.ok and (.checks.runtime.detail | contains("32768 tokens"))
 ' >/dev/null
@@ -149,6 +163,9 @@ jq -e 'length == 0' "$copilot_root/state/suggestion.json" >/dev/null
 
 grep -q 'id: suggestionWindow' "$plugin_dir/Panel.qml"
 grep -q 'text: "ALWAYS-ON COPILOT"' "$plugin_dir/Panel.qml"
+grep -q 'text: "LOCAL MODEL RUNTIME"' "$plugin_dir/Panel.qml"
+grep -q 'label: "Always-on Copilot"' "$plugin_dir/Panel.qml"
+grep -q 'text: root.settingsPage ? "Copilot settings" : "Local AI"' "$plugin_dir/Panel.qml"
 grep -q 'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' "$plugin_dir/Panel.qml"
 grep -q -- '--no-tools' "$plugin_dir/local-ai-copilot"
 grep -q -- '--no-skills' "$plugin_dir/local-ai-copilot"
