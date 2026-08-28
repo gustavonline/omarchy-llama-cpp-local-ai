@@ -147,12 +147,12 @@ jq -e 'length == 0' "$copilot_root/state/suggestion.json" >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" install-service >/dev/null
 [[ -f $copilot_root/units/omarchy-local-ai-copilot.service ]]
 
-rg -q 'id: suggestionWindow' "$plugin_dir/Panel.qml"
-rg -q 'text: "ALWAYS-ON COPILOT"' "$plugin_dir/Panel.qml"
-rg -q 'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' "$plugin_dir/Panel.qml"
-rg -q -- '--no-tools' "$plugin_dir/local-ai-copilot"
-rg -q -- '--no-skills' "$plugin_dir/local-ai-copilot"
-rg -q -- '--no-context-files' "$plugin_dir/local-ai-copilot"
+grep -q 'id: suggestionWindow' "$plugin_dir/Panel.qml"
+grep -q 'text: "ALWAYS-ON COPILOT"' "$plugin_dir/Panel.qml"
+grep -q 'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' "$plugin_dir/Panel.qml"
+grep -q -- '--no-tools' "$plugin_dir/local-ai-copilot"
+grep -q -- '--no-skills' "$plugin_dir/local-ai-copilot"
+grep -q -- '--no-context-files' "$plugin_dir/local-ai-copilot"
 
 if command -v omarchy >/dev/null; then
   omarchy plugin validate "$plugin_dir" >/dev/null
