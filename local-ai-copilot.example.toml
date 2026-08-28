@@ -1,4 +1,4 @@
-# Local AI Copilot
+# Local AI Always-on Assistant
 #
 # This optional subsystem is isolated from the Local AI runtime profiles and
 # local-ai-pi-worker. It only needs Pi and an OpenAI-compatible endpoint.
@@ -29,6 +29,9 @@ max_suggestions_per_hour = 8
 
 [privacy]
 share_window_title = true
+# Extra apps selected in the native settings picker. The protected baseline
+# below remains active even when this list is empty.
+blocked_apps = []
 deny_apps = ["1password", "bitwarden", "keepassxc", "org.gnome.seahorse"]
 deny_title_patterns = ["password", "passcode", "secret", "private key", "banking", "incognito", "private browsing"]
 
@@ -36,7 +39,7 @@ deny_title_patterns = ["password", "passcode", "secret", "private key", "banking
 # Optional, independent adapter. The command is opened in a visible terminal
 # only after the user clicks Delegate. The generated task is appended as the
 # final argv item. Leave empty when no heavy harness is installed.
-command = ["pi-worker", "--thinking", "low", "--no-web", "--"]
+command = ["pi-worker", "--profile", "inspect", "--thinking", "low", "--no-web", "--"]
 launch_in_terminal = true
 
 [playbook]

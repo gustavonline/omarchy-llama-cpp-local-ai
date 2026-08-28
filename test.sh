@@ -7,7 +7,7 @@ jq -e '
   .schemaVersion == 1 and
   .id == "io.github.gustavonline.local-ai" and
   .name == "Local AI" and
-  .version == "0.7.0" and
+  .version == "0.8.0" and
   (.kinds | index("bar-widget")) != null and
   .entryPoints.barWidget == "Panel.qml"
 ' "$plugin_dir/manifest.json" >/dev/null
@@ -101,6 +101,14 @@ fi
 # controller. All model, Hyprland, Pi, and systemd dependencies are fake.
 copilot_root="$test_root/copilot"
 mkdir -p "$copilot_root"
+mkdir -p "$copilot_root/data/applications"
+cat >"$copilot_root/data/applications/example-secret.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Example Secret
+Exec=/usr/bin/example-secret
+StartupWMClass=org.example.Secret
+EOF
 port_file="$copilot_root/port"
 python3 "$plugin_dir/tests/fake-openai-server.py" "$port_file" &
 server_pid=$!
@@ -111,7 +119,7 @@ port=$(<"$port_file")
 copilot_config="$copilot_root/config.toml"
 sed \
   -e "s#http://127.0.0.1:8080/v1#http://127.0.0.1:${port}/v1#" \
-  -e 's#command = \["pi-worker", "--thinking", "low", "--no-web", "--"\]#command = []#' \
+  -e 's#command = \["pi-worker", "--profile", "inspect", "--thinking", "low", "--no-web", "--"\]#command = []#' \
   -e "s#~/.config/omarchy/local-ai-copilot-playbook.json#${copilot_root}/playbook.json#" \
   "$plugin_dir/local-ai-copilot.example.toml" >"$copilot_config"
 
@@ -121,6 +129,7 @@ export LOCAL_AI_COPILOT_UNIT_DIR="$copilot_root/units"
 export LOCAL_AI_COPILOT_PI="$plugin_dir/tests/fake-pi"
 export LOCAL_AI_COPILOT_HYPRCTL="$plugin_dir/tests/fake-hyprctl"
 export LOCAL_AI_COPILOT_SYSTEMCTL="$plugin_dir/tests/fake-systemctl"
+export XDG_DATA_HOME="$copilot_root/data"
 
 model_choice="http://127.0.0.1:${port}/v1|test-local-model"
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" setup-state | jq -e \
@@ -128,12 +137,16 @@ model_choice="http://127.0.0.1:${port}/v1|test-local-model"
   .configured and (.modelChoices | map(.value) | index($choice)) != null
 ' >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" configure \
-  "$model_choice" 0.82 false >/dev/null
+  "$model_choice" 0.82 false '["org.example.Secret|example-secret"]' >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" setup-state | jq -e \
   --arg choice "$model_choice" '
   .config.modelChoice == $choice and
   .config.minimumConfidence == 0.82 and
-  (.config.shareWindowTitle | not)
+  (.config.shareWindowTitle | not) and
+  .config.blockedApps == ["org.example.Secret|example-secret"]
+' >/dev/null
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" apps | jq -e '
+  map(select(.value == "org.example.Secret|example-secret" and .label == "Example Secret")) | length == 1
 ' >/dev/null
 
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" doctor --online | jq -e '
@@ -162,10 +175,12 @@ jq -e 'length == 0' "$copilot_root/state/suggestion.json" >/dev/null
 [[ -f $copilot_root/units/omarchy-local-ai-copilot.service ]]
 
 grep -q 'id: suggestionWindow' "$plugin_dir/Panel.qml"
-grep -q 'text: "ALWAYS-ON COPILOT"' "$plugin_dir/Panel.qml"
+grep -q 'text: "ALWAYS-ON ASSISTANT"' "$plugin_dir/Panel.qml"
 grep -q 'text: "LOCAL MODEL RUNTIME"' "$plugin_dir/Panel.qml"
-grep -q 'label: "Always-on Copilot"' "$plugin_dir/Panel.qml"
-grep -q 'text: root.settingsPage ? "Copilot settings" : "Local AI"' "$plugin_dir/Panel.qml"
+grep -q 'label: "Always-on Assistant"' "$plugin_dir/Panel.qml"
+grep -q 'text: root.settingsPage ? "Assistant settings" : "Local AI"' "$plugin_dir/Panel.qml"
+grep -q 'label: "Blocked apps"' "$plugin_dir/Panel.qml"
+grep -q 'WheelHandler {' "$plugin_dir/Panel.qml"
 grep -q 'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' "$plugin_dir/Panel.qml"
 grep -q -- '--no-tools' "$plugin_dir/local-ai-copilot"
 grep -q -- '--no-skills' "$plugin_dir/local-ai-copilot"

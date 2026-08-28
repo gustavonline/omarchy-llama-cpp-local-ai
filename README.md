@@ -2,10 +2,10 @@
 
 One Omarchy bar widget for local AI: start and switch prepared **llama.cpp
 server profiles**, expose their OpenAI-compatible endpoints to clients such as
-Codex, and optionally enable a lightweight always-on local Copilot.
+Codex, and optionally enable a lightweight always-on local assistant.
 
-The runtime controller and Copilot are separate subsystems inside the same
-plugin and the same dropdown. The Copilot consumes a configured endpoint; it
+The runtime controller and assistant are separate subsystems inside the same
+plugin and the same dropdown. The assistant consumes a configured endpoint; it
 does not replace the profile controller or prevent other clients from using the
 endpoint.
 
@@ -15,7 +15,7 @@ endpoint.
 - `llama-server` from a llama.cpp build suitable for the machine
 - At least one local GGUF model and one tested systemd **user** service
 - `python3`, `jq`, `systemctl`, and `wl-copy` (provided by a normal Omarchy setup)
-- Pi (`pi`) only when the optional Copilot is enabled
+- Pi (`pi`) only when the optional assistant is enabled
 
 The plugin does not download models, install accelerators, generate services, or
 change GPU and power settings.
@@ -25,7 +25,7 @@ change GPU and power settings.
 ```bash
 omarchy plugin add https://github.com/gustavonline/omarchy-llama-cpp-local-ai --enable --yes
 install -Dm644 \
-  ~/.config/omarchy/plugins/io.github.gustavonline.local-ai/local-ai.example.toml \
+  ~/.config/omarchy/plugins/gustav.local-ai/local-ai.example.toml \
   ~/.config/omarchy/local-ai.toml
 ```
 
@@ -34,7 +34,7 @@ Prepare and test each model service using [SETUP.md](SETUP.md), then edit
 with:
 
 ```bash
-~/.config/omarchy/plugins/io.github.gustavonline.local-ai/local-ai-control doctor
+~/.config/omarchy/plugins/gustav.local-ai/local-ai-control doctor
 ```
 
 ## Runtime and endpoint controls
@@ -47,13 +47,14 @@ with:
 - Keeps every configured model disabled at login; panel starts are session-only.
 - Surfaces concrete configuration and systemd errors in the panel.
 
-## Optional always-on Copilot
+## Optional always-on assistant
 
-The **Always-on Copilot** section appears first in the same Local AI dropdown.
+The **Always-on Assistant** section appears first in the same Local AI dropdown.
 It is off by default and uses one persistent toggle. The adjacent settings page
 discovers compatible models from active local Ollama and llama.cpp endpoints,
-lets the user choose suggestion frequency and window-title sharing, and saves a
-private machine-local configuration. Turning the toggle on enables a hardened
+lets the user choose suggestion frequency, window-title sharing, and extra
+blocked apps using a native installed-app picker, and saves a private
+machine-local configuration. Turning the toggle on enables a hardened
 systemd user service that starts after graphical login.
 
 The first version is deliberately light and quiet:
@@ -70,7 +71,7 @@ The first version is deliberately light and quiet:
 - Never takes screenshots, runs shell tools, or mutates the desktop in this
   release.
 
-Copilot configuration is stored in
+Assistant configuration is stored in
 `~/.config/omarchy/local-ai-copilot.toml`. **Open advanced config** exposes the
 full TOML for unusual startup/delegation/privacy settings; its editable playbook defaults to
 `~/.config/omarchy/local-ai-copilot-playbook.json`. See the annotated
@@ -110,14 +111,14 @@ the source of truth, and the plugin reads `--model`, `--spec-draft-model`,
 Bind local inference services to `127.0.0.1` unless network access is intentional.
 If a service uses `--api-key`, configure that key in each external client
 separately. The panel copies only the endpoint and never displays credentials.
-For Copilot only, a named environment variable can supply the key. On a local
-loopback llama.cpp service, Copilot can also resolve the matching key from the
+For the assistant only, a named environment variable can supply the key. On a local
+loopback llama.cpp service, the assistant can also resolve the matching key from the
 same user's running process and writes it only to its mode-600 isolated Pi
 catalog; it never enters status, UI, audit logs, or the repository.
 
 Coding agents and other OpenAI-compatible clients remain separate consumers.
 Point them at the verified endpoint after the runtime reports healthy. Enabling
-Copilot does not reserve the endpoint for itself.
+The assistant does not reserve the endpoint for itself.
 
 ## Controls
 
@@ -125,7 +126,8 @@ Copilot does not reserve the endpoint for itself.
 - Right-click: start the default profile or stop the active profile
 - Middle-click: restart the active profile
 - Panel buttons: switch profile, start, stop, restart, copy URL, or edit profiles
-- Same panel: toggle Copilot and open its dedicated settings page
+- Same panel: toggle the assistant and open its dedicated settings page
+- Manual acceptance scenarios: [`docs/ASSISTANT-TESTING.md`](docs/ASSISTANT-TESTING.md)
 
 ## Verification
 
@@ -140,16 +142,16 @@ service, or a referenced model file is missing.
 
 ## Remove
 
-Disable Copilot and stop the configured runtimes before removing the widget:
+Disable the assistant and stop the configured runtimes before removing the widget:
 
 ```bash
-~/.config/omarchy/plugins/io.github.gustavonline.local-ai/local-ai-control stop
-~/.config/omarchy/plugins/io.github.gustavonline.local-ai/local-ai-copilot disable
+~/.config/omarchy/plugins/gustav.local-ai/local-ai-control stop
+~/.config/omarchy/plugins/gustav.local-ai/local-ai-copilot disable
 omarchy plugin remove io.github.gustavonline.local-ai --yes
 ```
 
 Removal leaves GGUF files, systemd user services, and
-`~/.config/omarchy/local-ai.toml`, Copilot settings, playbook, and local models
+`~/.config/omarchy/local-ai.toml`, assistant settings, playbook, and local models
 untouched.
 
 ## License

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 — 2026-08-28
+
+- Rename the public feature from Copilot to **Always-on Assistant** while
+  preserving internal commands, config paths, and services for compatibility
+- Add a Local Transcript-style installed-app picker for extra privacy blocks;
+  the built-in password-manager and sensitive-title protections remain fixed
+- Make mouse-wheel scrolling work across the whole panel, including its header,
+  and reset the scroll position when navigating between the main and settings pages
+- Add a practical manual acceptance guide covering quietness, privacy, lifecycle,
+  synthetic suggestions, explicit delegation, and current limitations
+- Verify compatibility with local-ai-pi-worker v0.4 and make its safe read-only
+  `inspect` delegation profile explicit in the example configuration
+
 ## 0.7.0 — 2026-08-28
 
 - Simplify the main panel around one always-on Copilot toggle and one settings

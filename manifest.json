@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.gustavonline.local-ai",
   "name": "Local AI",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "author": "Gustav Andersen",
   "license": "MIT",
-  "description": "Control local model endpoints and an optional always-on local Copilot from one Omarchy panel.",
+  "description": "Control local model endpoints and an optional always-on local assistant from one Omarchy panel.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -43,9 +43,9 @@
       {
         "key": "copilotConfigFile",
         "type": "path",
-        "label": "Copilot settings",
+        "label": "Assistant settings",
         "defaultValue": "~/.config/omarchy/local-ai-copilot.toml",
-        "description": "Machine-local settings for the optional always-on Copilot."
+        "description": "Machine-local settings for the optional always-on assistant."
       }
     ]
   }

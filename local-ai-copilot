@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ from typing import Any
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = Path("~/.config/omarchy/local-ai-copilot.toml").expanduser()
+XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
 STATE_DIR = Path(
     os.environ.get(
         "LOCAL_AI_COPILOT_STATE_DIR",
@@ -51,6 +53,10 @@ CONTROL_FILE = STATE_DIR / "control.json"
 AUDIT_FILE = STATE_DIR / "audit.jsonl"
 SYSTEM_PROMPT_FILE = PLUGIN_DIR / "prompts/copilot-system.md"
 EXAMPLE_CONFIG_FILE = PLUGIN_DIR / "local-ai-copilot.example.toml"
+PROTECTED_DENY_APPS = ("1password", "bitwarden", "keepassxc", "org.gnome.seahorse")
+PROTECTED_DENY_TITLE_PATTERNS = (
+    "password", "passcode", "secret", "private key", "banking", "incognito", "private browsing"
+)
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "runtime": {
@@ -74,6 +80,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "privacy": {
         "share_window_title": True,
+        "blocked_apps": [],
         "deny_apps": ["1password", "bitwarden", "keepassxc", "org.gnome.seahorse"],
         "deny_title_patterns": [
             "password",
@@ -184,6 +191,7 @@ def load_config(path: Path, *, require: bool = True) -> dict[str, dict[str, Any]
 
     if not isinstance(privacy["share_window_title"], bool):
         raise ConfigError("privacy.share_window_title must be a boolean")
+    validate_string_list(privacy["blocked_apps"], "privacy.blocked_apps")
     validate_string_list(privacy["deny_apps"], "privacy.deny_apps")
     validate_string_list(privacy["deny_title_patterns"], "privacy.deny_title_patterns")
     validate_argv(delegation["command"], "delegation.command")
@@ -343,6 +351,72 @@ def friendly_model_name(model_id: str) -> str:
     return re.sub(r"\s+", " ", label).strip()
 
 
+def desktop_entry_paths() -> list[Path]:
+    roots = [XDG_DATA_HOME / "applications"]
+    roots.extend(
+        Path(value) / "applications"
+        for value in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+        if value
+    )
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.desktop")):
+            identity = path.name.casefold()
+            if identity not in seen:
+                seen.add(identity)
+                paths.append(path)
+    return paths
+
+
+def executable_from_desktop(exec_line: str) -> str:
+    try:
+        parts = shlex.split(exec_line)
+    except ValueError:
+        parts = exec_line.split()
+    for part in parts:
+        if part == "env" or re.fullmatch(r"%[A-Za-z]", part) or ("=" in part and not part.startswith("/")):
+            continue
+        return Path(part).name
+    return ""
+
+
+def installed_app_options() -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for path in desktop_entry_paths():
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        try:
+            parser.read(path, encoding="utf-8")
+            entry = parser["Desktop Entry"]
+        except (OSError, KeyError, configparser.Error):
+            continue
+        if entry.get("Type", "Application") != "Application":
+            continue
+        if entry.get("Hidden", "false").lower() == "true" or entry.get("NoDisplay", "false").lower() == "true":
+            continue
+        label = entry.get("Name", "").strip()
+        startup_class = entry.get("StartupWMClass", "").strip()
+        executable = executable_from_desktop(entry.get("Exec", ""))
+        if executable in {"env", "sh", "bash", "gtk-launch", "omarchy-launch-webapp"}:
+            executable = ""
+        selectors = list(dict.fromkeys(value for value in (startup_class, path.stem, executable) if value))
+        selector = "|".join(selectors)
+        identity = selector.casefold()
+        if not label or not selector or identity in seen:
+            continue
+        seen.add(identity)
+        options.append({
+            "value": selector,
+            "label": label,
+            "description": "Matches: " + ", ".join(selectors),
+        })
+    return sorted(options, key=lambda option: (option["label"].casefold(), option["value"].casefold()))
+
+
 def endpoint_model_rows(endpoint: str, timeout: float = 0.8) -> list[dict[str, Any]]:
     request = urllib.request.Request(endpoint.rstrip("/") + "/models", headers={"Accept": "application/json"})
     try:
@@ -419,6 +493,7 @@ def setup_payload(config_path: Path) -> dict[str, Any]:
             "model": current_model,
             "minimumConfidence": float(config["observer"]["minimum_confidence"]),
             "shareWindowTitle": bool(config["privacy"]["share_window_title"]),
+            "blockedApps": list(config["privacy"]["blocked_apps"]),
         },
         "modelChoices": choices,
     }
@@ -429,6 +504,7 @@ def configure_from_ui(
     model_choice: str,
     confidence_text: str,
     share_title_text: str,
+    blocked_apps_text: str = "[]",
 ) -> None:
     if "|" not in model_choice:
         raise ConfigError("choose an available local model")
@@ -448,6 +524,14 @@ def configure_from_ui(
         raise ConfigError("suggestion sensitivity is invalid")
     if share_title_text not in {"true", "false"}:
         raise ConfigError("window-title setting is invalid")
+    try:
+        blocked_apps = json.loads(blocked_apps_text)
+    except json.JSONDecodeError as error:
+        raise ConfigError("blocked-apps setting is invalid") from error
+    validate_string_list(blocked_apps, "privacy.blocked_apps")
+    if len(blocked_apps) > 100:
+        raise ConfigError("privacy.blocked_apps cannot contain more than 100 apps")
+    blocked_apps = list(dict.fromkeys(item.strip()[:200] for item in blocked_apps))
 
     config = load_config(config_path, require=False)
     previous_endpoint = str(config["runtime"]["endpoint"]).rstrip("/")
@@ -459,6 +543,7 @@ def configure_from_ui(
         config["runtime"]["start_command"] = []
     config["observer"]["minimum_confidence"] = confidence
     config["privacy"]["share_window_title"] = share_title_text == "true"
+    config["privacy"]["blocked_apps"] = blocked_apps
     save_config(config_path, config)
     if service_flag("is-active"):
         result = systemctl("restart", UNIT_NAME)
@@ -658,9 +743,16 @@ def active_context(config: dict[str, dict[str, Any]]) -> dict[str, str] | None:
     lowered_app = app_id.lower()
     lowered_title = title.lower()
     privacy = config["privacy"]
-    if any(needle.lower() in lowered_app for needle in privacy["deny_apps"]):
+    blocked_apps = [*PROTECTED_DENY_APPS, *privacy["deny_apps"], *privacy["blocked_apps"]]
+    if any(
+        token.casefold() in lowered_app
+        for rule in blocked_apps
+        for token in rule.split("|")
+        if token.strip()
+    ):
         return None
-    if any(needle.lower() in lowered_title for needle in privacy["deny_title_patterns"]):
+    title_patterns = [*PROTECTED_DENY_TITLE_PATTERNS, *privacy["deny_title_patterns"]]
+    if any(needle.lower() in lowered_title for needle in title_patterns):
         return None
     if not privacy["share_window_title"]:
         title = ""
@@ -1063,7 +1155,13 @@ def status_payload(config_path: Path) -> dict[str, Any]:
         "privacy": {
             "windowTitle": bool(config["privacy"]["share_window_title"]),
             "screenshots": False,
-            "denyRules": len(config["privacy"]["deny_apps"]) + len(config["privacy"]["deny_title_patterns"]),
+            "denyRules": len(set([
+                *PROTECTED_DENY_APPS,
+                *config["privacy"]["deny_apps"],
+                *config["privacy"]["blocked_apps"],
+                *PROTECTED_DENY_TITLE_PATTERNS,
+                *config["privacy"]["deny_title_patterns"],
+            ])),
         },
     }
 
@@ -1144,10 +1242,12 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
     subparsers.add_parser("setup-state")
+    subparsers.add_parser("apps")
     configure_parser = subparsers.add_parser("configure")
     configure_parser.add_argument("model_choice")
     configure_parser.add_argument("minimum_confidence")
     configure_parser.add_argument("share_window_title")
+    configure_parser.add_argument("blocked_apps", nargs="?", default="[]")
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--online", action="store_true")
     subparsers.add_parser("render-service")
@@ -1175,12 +1275,15 @@ def main() -> int:
             print(json.dumps(status_payload(config_path), ensure_ascii=False, separators=(",", ":")))
         elif args.command == "setup-state":
             print(json.dumps(setup_payload(config_path), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "apps":
+            print(json.dumps(installed_app_options(), ensure_ascii=False))
         elif args.command == "configure":
             configure_from_ui(
                 config_path,
                 args.model_choice,
                 args.minimum_confidence,
                 args.share_window_title,
+                args.blocked_apps,
             )
             print("configured")
         elif args.command == "doctor":

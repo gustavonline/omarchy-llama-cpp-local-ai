@@ -66,6 +66,7 @@ Panel {
   property string selectedModelChoice: ""
   property string selectedConfidence: "0.72"
   property bool selectedShareWindowTitle: true
+  property var selectedBlockedApps: []
   property var copilotModelOptions: []
   readonly property var confidenceOptions: [
     { value: "0.82", label: "Quiet", description: "Only very high-confidence suggestions" },
@@ -188,6 +189,7 @@ Panel {
       copilotActionProcess.command.push(selectedModelChoice)
       copilotActionProcess.command.push(selectedConfidence)
       copilotActionProcess.command.push(selectedShareWindowTitle ? "true" : "false")
+      copilotActionProcess.command.push(JSON.stringify(selectedBlockedApps))
     }
     copilotActionProcess.running = true
   }
@@ -204,11 +206,12 @@ Panel {
     selectedConfidence = Number(config.minimumConfidence || 0.72).toFixed(2)
     selectedShareWindowTitle = config.shareWindowTitle === undefined
       ? true : Boolean(config.shareWindowTitle)
+    selectedBlockedApps = Array.isArray(config.blockedApps) ? config.blockedApps : []
   }
 
   function saveCopilotSetup() {
     if (selectedModelChoice === "") {
-      showCopilotError("Choose a local Copilot model")
+      showCopilotError("Choose a local assistant model")
       return
     }
     runCopilotAction("configure")
@@ -239,19 +242,19 @@ Panel {
   }
 
   function copilotSuccessMessage(action) {
-    if (action === "enable") return "Copilot enabled"
-    if (action === "disable") return "Copilot disabled"
-    if (action === "pause") return "Copilot paused"
-    if (action === "resume") return "Copilot resumed"
+    if (action === "enable") return "Assistant enabled"
+    if (action === "disable") return "Assistant disabled"
+    if (action === "pause") return "Assistant paused"
+    if (action === "resume") return "Assistant resumed"
     if (action === "dismiss") return "Suggestion dismissed"
     if (action === "copy") return "Suggestion copied"
     if (action === "remember") return "Playbook rule saved"
     if (action === "delegate") return "Task opened in the heavy harness"
     if (action === "test-suggestion") return "Test suggestion shown"
-    if (action === "restart") return "Copilot restarted"
-    if (action === "edit-settings") return "Copilot settings opened"
-    if (action === "configure") return "Copilot settings saved"
-    return "Copilot updated"
+    if (action === "restart") return "Assistant restarted"
+    if (action === "edit-settings") return "Assistant settings opened"
+    if (action === "configure") return "Assistant settings saved"
+    return "Assistant updated"
   }
 
   onOpenedChanged: if (opened) {
@@ -395,14 +398,14 @@ Panel {
         try {
           root.applyCopilotStatus(JSON.parse(String(text || "{}")))
         } catch (error) {
-          root.showCopilotError("Could not read Copilot status")
+          root.showCopilotError("Could not read assistant status")
         }
       }
     }
     stderr: StdioCollector { id: copilotStatusError; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        var detail = String(copilotStatusError.text || "Could not read Copilot status").trim()
+        var detail = String(copilotStatusError.text || "Could not read assistant status").trim()
         root.showCopilotError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
       }
     }
@@ -418,14 +421,14 @@ Panel {
         try {
           root.applyCopilotSetup(JSON.parse(String(text || "{}")))
         } catch (error) {
-          root.showCopilotError("Could not read Copilot settings")
+          root.showCopilotError("Could not read assistant settings")
         }
       }
     }
     stderr: StdioCollector { id: copilotSetupError; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        var detail = String(copilotSetupError.text || "Could not read Copilot settings").trim()
+        var detail = String(copilotSetupError.text || "Could not read assistant settings").trim()
         root.showCopilotError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
       }
     }
@@ -440,7 +443,7 @@ Panel {
       root.copilotBusy = false
       if (exitCode === 0) root.showCopilotFeedback(root.copilotSuccessMessage(root.copilotPendingAction))
       else {
-        var detail = String(copilotActionError.text || copilotActionOutput.text || "Copilot action failed").trim()
+        var detail = String(copilotActionError.text || copilotActionOutput.text || "Assistant action failed").trim()
         root.showCopilotError(detail.length > 220 ? detail.slice(0, 217) + "…" : detail)
       }
       if (exitCode === 0 && root.copilotPendingAction === "configure") {
@@ -476,7 +479,7 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: "󰍛"
-    tooltipText: "Local AI · Runtime " + root.stateLabel + " · Copilot " + root.copilotStateLabel
+    tooltipText: "Local AI · Runtime " + root.stateLabel + " · Assistant " + root.copilotStateLabel
     active: root.running || (root.copilotActive && !root.copilotPaused)
     useActiveColor: false
 
@@ -515,9 +518,21 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: modelDropdown.popupOpen || sensitivityDropdown.popupOpen
+      blocked: modelDropdown.popupOpen || sensitivityDropdown.popupOpen || appPicker.popupOpen
       onActivateRequested: root.refresh()
       onCloseRequested: root.close()
+
+      WheelHandler {
+        target: null
+        enabled: panelContent.contentHeight > panelContent.height
+          && !modelDropdown.popupOpen && !sensitivityDropdown.popupOpen && !appPicker.popupOpen
+        onWheel: event => {
+          var delta = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 2
+          var maximum = Math.max(0, panelContent.contentHeight - panelContent.height)
+          panelContent.contentY = Math.max(0, Math.min(maximum, panelContent.contentY - delta))
+          event.accepted = true
+        }
+      }
 
       Flickable {
         id: panelContent
@@ -549,7 +564,7 @@ Panel {
 
               Text {
                 width: parent.width
-                text: root.settingsPage ? "Copilot settings" : "Local AI"
+                text: root.settingsPage ? "Assistant settings" : "Local AI"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -560,7 +575,7 @@ Panel {
               Text {
                 width: parent.width
                 visible: !root.settingsPage
-                text: (root.copilotEnabled ? "Copilot on" : "Copilot off")
+                text: (root.copilotEnabled ? "Assistant on" : "Assistant off")
                   + " · " + (root.running ? "Runtime running" : "Runtime stopped")
                 color: root.copilotEnabled ? root.accent : root.dim
                 font.family: root.fontFamily
@@ -573,7 +588,7 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               iconText: root.settingsPage ? "󰁍" : "󰒓"
-              tooltipText: root.settingsPage ? "Back" : "Copilot settings"
+              tooltipText: root.settingsPage ? "Back" : "Assistant settings"
               foreground: root.foreground
               hoverColor: root.accent
               fontFamily: root.fontFamily
@@ -581,6 +596,7 @@ Panel {
               focusable: true
               onClicked: {
                 root.settingsPage = !root.settingsPage
+                panelContent.contentY = 0
                 root.clearCopilotFeedback()
                 if (root.settingsPage) root.refreshCopilotSetup()
                 else root.refresh()
@@ -597,14 +613,14 @@ Panel {
 
             PanelSectionHeader {
               width: parent.width
-              text: "ALWAYS-ON COPILOT"
+              text: "ALWAYS-ON ASSISTANT"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
             Toggle {
               width: parent.width
-              label: "Always-on Copilot"
+              label: "Always-on Assistant"
               description: !root.copilotStatus.configured
                 ? "Open settings to choose a small local model"
                 : root.currentCopilotModelLabel() + " · " + root.copilotStateLabel
@@ -799,7 +815,7 @@ Panel {
             Dropdown {
               id: modelDropdown
               width: parent.width
-              label: "Copilot model"
+              label: "Assistant model"
               value: root.selectedModelChoice
               options: root.copilotModelOptions
               foreground: root.foreground
@@ -846,6 +862,30 @@ Panel {
               accent: root.accent
               fontFamily: root.fontFamily
               onClicked: root.selectedShareWindowTitle = !root.selectedShareWindowTitle
+            }
+
+            MultiSelect {
+              id: appPicker
+              width: parent.width
+              label: "Blocked apps"
+              values: root.selectedBlockedApps
+              optionsCommand: [root.copilotControlPath, "--config", root.copilotConfigFile, "apps"]
+              placeholderText: "Search installed apps…"
+              noSelectionText: "No extra apps blocked"
+              emptyText: "No installed apps found"
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(values) { root.selectedBlockedApps = values }
+            }
+
+            Text {
+              width: parent.width
+              text: "Password managers and sensitive window-title patterns stay protected automatically."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             Text {
@@ -945,7 +985,7 @@ Panel {
 
           Text {
             width: parent.width - Style.space(34)
-            text: String(root.suggestion.title || "Local AI Copilot")
+            text: String(root.suggestion.title || "Local Assistant")
             color: Color.notifications.text
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
