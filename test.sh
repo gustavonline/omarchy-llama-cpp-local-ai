@@ -109,6 +109,13 @@ Name=Example Secret
 Exec=/usr/bin/example-secret
 StartupWMClass=org.example.Secret
 EOF
+cat >"$copilot_root/data/applications/bitwarden.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Bitwarden
+Exec=/usr/bin/bitwarden
+StartupWMClass=bitwarden
+EOF
 port_file="$copilot_root/port"
 python3 "$plugin_dir/tests/fake-openai-server.py" "$port_file" &
 server_pid=$!
@@ -146,7 +153,8 @@ model_choice="http://127.0.0.1:${port}/v1|test-local-model"
   .config.blockedApps == ["org.example.Secret|example-secret"]
 ' >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" apps | jq -e '
-  map(select(.value == "org.example.Secret|example-secret" and .label == "Example Secret")) | length == 1
+  (map(select(.value == "org.example.Secret|example-secret" and .label == "Example Secret")) | length == 1) and
+  (map(select(.label == "Bitwarden")) | length == 0)
 ' >/dev/null
 
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" doctor --online | jq -e '

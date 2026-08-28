@@ -406,6 +406,8 @@ def installed_app_options() -> list[dict[str, str]]:
         selectors = list(dict.fromkeys(value for value in (startup_class, path.stem, executable) if value))
         selector = "|".join(selectors)
         identity = selector.casefold()
+        if any(protected in identity for protected in PROTECTED_DENY_APPS):
+            continue
         if not label or not selector or identity in seen:
             continue
         seen.add(identity)
