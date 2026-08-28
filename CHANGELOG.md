@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 — 2026-08-28
+
+- Add a native **Preferred harness** setting with automatic discovery of Codex,
+  Claude Code, Gemini CLI, Pi Worker, Pi, and an optional custom adapter
+- Replace the generic Delegate action with an explicit **Continue in…** chooser
+  on each suggestion; the configured default is highlighted without hiding the
+  other installed harnesses
+- Keep every handoff user-approved, open it visibly in a terminal, and record
+  the chosen harness in the metadata-only audit log
+- Hide the panel's visual scrollbar while preserving mouse-wheel, touchpad, and
+  drag scrolling across the full panel
+- Reframe acceptance testing around normal work and real local inference; keep
+  the synthetic suggestion command as a developer-only regression fixture
+
 ## 0.8.0 — 2026-08-28
 
 - Rename the public feature from Copilot to **Always-on Assistant** while

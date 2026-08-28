@@ -36,9 +36,12 @@ deny_apps = ["1password", "bitwarden", "keepassxc", "org.gnome.seahorse"]
 deny_title_patterns = ["password", "passcode", "secret", "private key", "banking", "incognito", "private browsing"]
 
 [delegation]
-# Optional, independent adapter. The command is opened in a visible terminal
-# only after the user clicks Delegate. The generated task is appended as the
-# final argv item. Leave empty when no heavy harness is installed.
+# Choose "auto" to pick from installed harnesses on each suggestion, or use
+# codex, claude, gemini, pi-worker, pi, or custom as the default Continue target.
+preferred_harness = "auto"
+# Optional independent adapter for custom commands or extra Pi Worker flags.
+# It is opened in a visible terminal only after the user clicks Continue.
+# The generated task is appended as the final argv item.
 command = ["pi-worker", "--profile", "inspect", "--thinking", "low", "--no-web", "--"]
 launch_in_terminal = true
 

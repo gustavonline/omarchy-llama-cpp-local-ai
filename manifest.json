@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.gustavonline.local-ai",
   "name": "Local AI",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "author": "Gustav Andersen",
   "license": "MIT",
   "description": "Control local model endpoints and an optional always-on local assistant from one Omarchy panel.",

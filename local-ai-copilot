@@ -57,6 +57,14 @@ PROTECTED_DENY_APPS = ("1password", "bitwarden", "keepassxc", "org.gnome.seahors
 PROTECTED_DENY_TITLE_PATTERNS = (
     "password", "passcode", "secret", "private key", "banking", "incognito", "private browsing"
 )
+HARNESS_SPECS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("codex", "Codex", "Codex CLI · new interactive task", ("codex",)),
+    ("claude", "Claude Code", "Claude Code · new interactive task", ("claude",)),
+    ("gemini", "Gemini CLI", "Gemini CLI · new interactive task", ("gemini",)),
+    ("pi-worker", "Pi Worker", "Bounded worker · inspect profile", ("pi-worker",)),
+    ("pi", "Pi", "Pi · new interactive task", ("pi", "--")),
+)
+HARNESS_IDS = {item[0] for item in HARNESS_SPECS}
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "runtime": {
@@ -93,6 +101,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         ],
     },
     "delegation": {
+        "preferred_harness": "auto",
         "command": [],
         "launch_in_terminal": True,
     },
@@ -194,6 +203,10 @@ def load_config(path: Path, *, require: bool = True) -> dict[str, dict[str, Any]
     validate_string_list(privacy["blocked_apps"], "privacy.blocked_apps")
     validate_string_list(privacy["deny_apps"], "privacy.deny_apps")
     validate_string_list(privacy["deny_title_patterns"], "privacy.deny_title_patterns")
+    if not isinstance(delegation["preferred_harness"], str) or delegation["preferred_harness"] not in {
+        "auto", "custom", *HARNESS_IDS
+    }:
+        raise ConfigError("delegation.preferred_harness must be auto, custom, or a supported harness id")
     validate_argv(delegation["command"], "delegation.command")
     if not isinstance(delegation["launch_in_terminal"], bool):
         raise ConfigError("delegation.launch_in_terminal must be a boolean")
@@ -419,6 +432,62 @@ def installed_app_options() -> list[dict[str, str]]:
     return sorted(options, key=lambda option: (option["label"].casefold(), option["value"].casefold()))
 
 
+def executable_available(executable: str) -> bool:
+    return shutil.which(executable) is not None or (Path(executable).is_file() and os.access(executable, os.X_OK))
+
+
+def harness_options(config: dict[str, dict[str, Any]], *, include_auto: bool = False) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    if include_auto:
+        options.append({
+            "value": "auto",
+            "label": "Choose each time",
+            "description": "Show installed harnesses on every Continue action",
+        })
+    for harness_id, label, description, command in HARNESS_SPECS:
+        if executable_available(command[0]):
+            options.append({"value": harness_id, "label": label, "description": description})
+
+    configured = config["delegation"]["command"]
+    configured_name = Path(configured[0]).name if configured else ""
+    if configured and configured_name not in HARNESS_IDS and executable_available(configured[0]):
+        options.append({
+            "value": "custom",
+            "label": "Custom command",
+            "description": configured_name,
+        })
+    return options
+
+
+def harness_label(config: dict[str, dict[str, Any]], harness_id: str) -> str:
+    if harness_id == "auto":
+        return "Choose each time"
+    return next(
+        (option["label"] for option in harness_options(config) if option["value"] == harness_id),
+        "Unavailable harness",
+    )
+
+
+def harness_argv(config: dict[str, dict[str, Any]], harness_id: str, prompt: str) -> list[str]:
+    if harness_id == "auto":
+        raise RuntimeError("choose an installed harness")
+    available = {option["value"] for option in harness_options(config)}
+    if harness_id not in available:
+        raise RuntimeError(f"harness is not installed: {harness_id}")
+
+    configured = config["delegation"]["command"]
+    configured_name = Path(configured[0]).name if configured else ""
+    if harness_id == "custom":
+        command = configured
+    elif configured and configured_name == harness_id:
+        command = configured
+    else:
+        command = list(next(spec[3] for spec in HARNESS_SPECS if spec[0] == harness_id))
+        if harness_id == "pi-worker":
+            command = ["pi-worker", "--profile", "inspect", "--thinking", "low", "--no-web", "--"]
+    return [*command, prompt]
+
+
 def endpoint_model_rows(endpoint: str, timeout: float = 0.8) -> list[dict[str, Any]]:
     request = urllib.request.Request(endpoint.rstrip("/") + "/models", headers={"Accept": "application/json"})
     try:
@@ -496,8 +565,10 @@ def setup_payload(config_path: Path) -> dict[str, Any]:
             "minimumConfidence": float(config["observer"]["minimum_confidence"]),
             "shareWindowTitle": bool(config["privacy"]["share_window_title"]),
             "blockedApps": list(config["privacy"]["blocked_apps"]),
+            "preferredHarness": str(config["delegation"]["preferred_harness"]),
         },
         "modelChoices": choices,
+        "harnessChoices": harness_options(config, include_auto=True),
     }
 
 
@@ -507,6 +578,7 @@ def configure_from_ui(
     confidence_text: str,
     share_title_text: str,
     blocked_apps_text: str = "[]",
+    preferred_harness: str = "auto",
 ) -> None:
     if "|" not in model_choice:
         raise ConfigError("choose an available local model")
@@ -536,6 +608,9 @@ def configure_from_ui(
     blocked_apps = list(dict.fromkeys(item.strip()[:200] for item in blocked_apps))
 
     config = load_config(config_path, require=False)
+    harness_values = {option["value"] for option in harness_options(config, include_auto=True)}
+    if preferred_harness not in harness_values:
+        raise ConfigError("choose an installed preferred harness or Choose each time")
     previous_endpoint = str(config["runtime"]["endpoint"]).rstrip("/")
     config["runtime"]["endpoint"] = endpoint
     config["runtime"]["model"] = model_id
@@ -546,6 +621,7 @@ def configure_from_ui(
     config["observer"]["minimum_confidence"] = confidence
     config["privacy"]["share_window_title"] = share_title_text == "true"
     config["privacy"]["blocked_apps"] = blocked_apps
+    config["delegation"]["preferred_harness"] = preferred_harness
     save_config(config_path, config)
     if service_flag("is-active"):
         result = systemctl("restart", UNIT_NAME)
@@ -1127,8 +1203,8 @@ def status_payload(config_path: Path) -> dict[str, Any]:
     suggestion = read_json(SUGGESTION_FILE, {})
     if not isinstance(suggestion, dict) or int(suggestion.get("expiresAt", 0) or 0) <= int(time.time()):
         suggestion = {}
-    delegation = config["delegation"]["command"]
-    delegate_available = bool(delegation) and shutil.which(delegation[0]) is not None
+    available_harnesses = harness_options(config)
+    preferred_harness = str(config["delegation"]["preferred_harness"])
     active = service_flag("is-active")
     enabled = service_flag("is-enabled")
     state = "disabled"
@@ -1152,7 +1228,10 @@ def status_payload(config_path: Path) -> dict[str, Any]:
         "lastError": str(daemon.get("lastError") or config_error),
         "suggestionFile": str(SUGGESTION_FILE),
         "playbookFile": str(expand_path(config["playbook"]["path"])),
-        "delegateAvailable": delegate_available,
+        "delegateAvailable": bool(available_harnesses),
+        "preferredHarness": preferred_harness,
+        "preferredHarnessLabel": harness_label(config, preferred_harness),
+        "harnessChoices": available_harnesses,
         "suggestion": suggestion,
         "privacy": {
             "windowTitle": bool(config["privacy"]["share_window_title"]),
@@ -1250,6 +1329,7 @@ def main() -> int:
     configure_parser.add_argument("minimum_confidence")
     configure_parser.add_argument("share_window_title")
     configure_parser.add_argument("blocked_apps", nargs="?", default="[]")
+    configure_parser.add_argument("preferred_harness", nargs="?", default="auto")
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--online", action="store_true")
     subparsers.add_parser("render-service")
@@ -1262,7 +1342,8 @@ def main() -> int:
     subparsers.add_parser("dismiss")
     subparsers.add_parser("copy")
     subparsers.add_parser("remember")
-    subparsers.add_parser("delegate")
+    delegate_parser = subparsers.add_parser("delegate")
+    delegate_parser.add_argument("harness", nargs="?", default="")
     subparsers.add_parser("edit-settings")
     subparsers.add_parser("open-playbook")
     subparsers.add_parser("test-suggestion")
@@ -1286,6 +1367,7 @@ def main() -> int:
                 args.minimum_confidence,
                 args.share_window_title,
                 args.blocked_apps,
+                args.preferred_harness,
             )
             print("configured")
         elif args.command == "doctor":
@@ -1348,15 +1430,13 @@ def main() -> int:
             config = load_config(config_path)
             suggestion = current_suggestion()
             delegation = config["delegation"]
-            command = delegation["command"]
-            if not command:
-                raise RuntimeError("delegation.command is not configured")
+            harness = args.harness or str(delegation["preferred_harness"])
             prompt = str(suggestion.get("delegatePrompt") or suggestion.get("body") or "")
-            argv = [*command, prompt]
+            argv = harness_argv(config, harness, prompt)
             if delegation["launch_in_terminal"]:
                 argv = ["omarchy", "launch", "terminal", *argv]
             subprocess.Popen(argv, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            append_audit("delegated", suggestion)
+            append_audit("delegated", suggestion, harness=harness)
             clear_suggestion()
             print("delegated")
         elif args.command == "edit-settings":

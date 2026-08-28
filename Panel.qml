@@ -62,12 +62,15 @@ Panel {
   property string copilotFeedback: ""
   property bool copilotFeedbackIsError: false
   property string copilotPendingAction: ""
+  property bool harnessMenuOpen: false
   property double clockMs: Date.now()
   property string selectedModelChoice: ""
   property string selectedConfidence: "0.72"
+  property string selectedPreferredHarness: "auto"
   property bool selectedShareWindowTitle: true
   property var selectedBlockedApps: []
   property var copilotModelOptions: []
+  property var copilotHarnessOptions: []
   readonly property var confidenceOptions: [
     { value: "0.82", label: "Quiet", description: "Only very high-confidence suggestions" },
     { value: "0.72", label: "Balanced", description: "Recommended" },
@@ -179,10 +182,11 @@ Panel {
     copilotFeedbackTimer.stop()
   }
 
-  function runCopilotAction(action) {
+  function runCopilotAction(action, argument) {
     if (copilotActionProcess.running) return
     copilotBusy = true
     copilotPendingAction = action
+    if (action === "delegate") harnessMenuOpen = false
     clearCopilotFeedback()
     copilotActionProcess.command = [copilotControlPath, "--config", copilotConfigFile, action]
     if (action === "configure") {
@@ -190,7 +194,9 @@ Panel {
       copilotActionProcess.command.push(selectedConfidence)
       copilotActionProcess.command.push(selectedShareWindowTitle ? "true" : "false")
       copilotActionProcess.command.push(JSON.stringify(selectedBlockedApps))
+      copilotActionProcess.command.push(selectedPreferredHarness)
     }
+    if (action === "delegate" && argument) copilotActionProcess.command.push(String(argument))
     copilotActionProcess.running = true
   }
 
@@ -202,8 +208,10 @@ Panel {
     if (!value || typeof value !== "object") return
     var config = value.config || {}
     copilotModelOptions = Array.isArray(value.modelChoices) ? value.modelChoices : []
+    copilotHarnessOptions = Array.isArray(value.harnessChoices) ? value.harnessChoices : []
     selectedModelChoice = String(config.modelChoice || "")
     selectedConfidence = Number(config.minimumConfidence || 0.72).toFixed(2)
+    selectedPreferredHarness = String(config.preferredHarness || "auto")
     selectedShareWindowTitle = config.shareWindowTitle === undefined
       ? true : Boolean(config.shareWindowTitle)
     selectedBlockedApps = Array.isArray(config.blockedApps) ? config.blockedApps : []
@@ -225,6 +233,19 @@ Panel {
       : String(copilotStatus.modelLabel || copilotStatus.model || "Local model")
   }
 
+  function preferredHarnessLabel() {
+    var preferred = String(copilotStatus.preferredHarness || selectedPreferredHarness || "auto")
+    if (preferred === "auto") return ""
+    var options = Array.isArray(copilotStatus.harnessChoices) ? copilotStatus.harnessChoices : []
+    var selected = options.find(function(option) { return String(option.value || "") === preferred })
+    return selected ? String(selected.label || "") : String(copilotStatus.preferredHarnessLabel || "")
+  }
+
+  function continueButtonLabel() {
+    var label = preferredHarnessLabel()
+    return label === "" ? "Continue in…  ▾" : "Continue in " + label + "  ▾"
+  }
+
   function applyCopilotStatus(value) {
     if (!value || typeof value !== "object") return
     copilotStatus = value
@@ -235,9 +256,12 @@ Panel {
   function applySuggestion(text) {
     try {
       var value = JSON.parse(String(text || "{}"))
+      var nextId = value && typeof value === "object" ? String(value.id || "") : ""
+      if (nextId !== String(suggestion.id || "")) harnessMenuOpen = false
       suggestion = value && typeof value === "object" ? value : ({})
     } catch (error) {
       suggestion = ({})
+      harnessMenuOpen = false
     }
   }
 
@@ -518,14 +542,16 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: modelDropdown.popupOpen || sensitivityDropdown.popupOpen || appPicker.popupOpen
+      blocked: modelDropdown.popupOpen || harnessDropdown.popupOpen
+        || sensitivityDropdown.popupOpen || appPicker.popupOpen
       onActivateRequested: root.refresh()
       onCloseRequested: root.close()
 
       WheelHandler {
         target: null
         enabled: panelContent.contentHeight > panelContent.height
-          && !modelDropdown.popupOpen && !sensitivityDropdown.popupOpen && !appPicker.popupOpen
+          && !modelDropdown.popupOpen && !harnessDropdown.popupOpen
+          && !sensitivityDropdown.popupOpen && !appPicker.popupOpen
         onWheel: event => {
           var delta = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 2
           var maximum = Math.max(0, panelContent.contentHeight - panelContent.height)
@@ -544,7 +570,7 @@ Panel {
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
         bottomMargin: Style.space(12)
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
 
         Column {
           id: contentColumn
@@ -836,6 +862,25 @@ Panel {
 
             PanelSectionHeader {
               width: parent.width
+              text: "HANDOFF"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Dropdown {
+              id: harnessDropdown
+              width: parent.width
+              label: "Preferred harness"
+              value: root.selectedPreferredHarness
+              options: root.copilotHarnessOptions
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(value) { root.selectedPreferredHarness = value }
+            }
+
+            PanelSectionHeader {
+              width: parent.width
               text: "SUGGESTIONS"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -890,7 +935,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: "Local metadata only · no screenshots · no autonomous tools"
+              text: "Filtered app metadata → quiet local decision → every action needs your click"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1059,13 +1104,44 @@ Panel {
           Button {
             width: parent.cellWidth
             visible: root.copilotStatus.delegateAvailable && String(root.suggestion.delegatePrompt || "") !== ""
-            text: "Delegate…"
+            text: root.continueButtonLabel()
             bordered: true
             foreground: Color.notifications.text
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             verticalPadding: Style.spacing.controlPaddingY
-            onClicked: root.runCopilotAction("delegate")
+            onClicked: root.harnessMenuOpen = !root.harnessMenuOpen
+          }
+        }
+
+        Column {
+          width: parent.width
+          visible: root.harnessMenuOpen && root.copilotStatus.delegateAvailable
+          spacing: Style.space(6)
+
+          Text {
+            width: parent.width
+            text: "Continue in"
+            color: Qt.darker(Color.notifications.text, 1.35)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Repeater {
+            model: root.copilotStatus.harnessChoices || []
+
+            Button {
+              required property var modelData
+              width: suggestionContent.width
+              text: String(modelData.label || modelData.value || "Harness")
+              selected: String(modelData.value || "") === String(root.copilotStatus.preferredHarness || "")
+              bordered: true
+              foreground: Color.notifications.text
+              fontFamily: root.fontFamily
+              fontSize: Style.font.bodySmall
+              verticalPadding: Style.spacing.controlPaddingY
+              onClicked: root.runCopilotAction("delegate", String(modelData.value || ""))
+            }
           }
         }
       }

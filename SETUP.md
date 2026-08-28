@@ -58,28 +58,28 @@ The service is the source of truth. The plugin reads `--model`,
 Harnesses such as Pi or Codex are separate clients. Configure them against the
 endpoint shown by the panel after the runtime has been verified.
 
-## Optional Copilot contract
+## Optional Always-on Assistant contract
 
-Copilot is a fourth, optional consumer of the endpoint, not another runtime
-profile and not another Omarchy plugin. Configure it from the **Always-on
-Copilot** section in the Local AI dropdown.
+The assistant is a fourth, optional consumer of the endpoint, not another
+runtime profile and not another Omarchy plugin. Configure it from the
+**Always-on Assistant** section in the Local AI dropdown.
 
 1. Install Pi and start the desired light-model endpoint.
-2. Open **Copilot settings**. Choose one of the locally discovered models; the
+2. Open **Assistant settings**. Choose one of the locally discovered models; the
    smallest available model is identified as the fastest option.
-3. Choose the suggestion frequency and whether filtered window titles may be
-   shared with the local model, then save.
+3. Choose the suggestion frequency, preferred installed harness, and whether
+   filtered window titles may be shared with the local model, then save.
 4. If the endpoint should be started automatically, use **Open advanced config**
    to configure a fixed
    `runtime.start_command` argv that invokes `local-ai-control start PROFILE`.
 5. Keep screenshots disabled. Adjust privacy deny rules before widening shared
    window metadata.
-6. Configure delegation only as a fixed argv. It is launched in a visible
-   terminal after an explicit click; it is never a tool granted to the light
-   model.
-7. Run `local-ai-copilot doctor --online`, test a synthetic suggestion, then
-   enable the observer.
+6. Optionally keep a fixed argv for custom handoffs or Pi Worker flags. Every
+   detected harness is launched in a visible terminal after an explicit click;
+   it is never a tool granted to the light model.
+7. Run `local-ai-copilot doctor --online`, then enable the assistant and use the
+   real-work acceptance guide.
 
-The Copilot systemd service owns only its observer, state, isolated Pi catalog,
+The assistant systemd service owns only its observer, state, isolated Pi catalog,
 and suggestion UI. Disabling it must not stop or rewrite the shared model
 runtime.

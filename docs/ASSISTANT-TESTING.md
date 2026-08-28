@@ -6,7 +6,9 @@ capture, computer use, AIOS access, or an autonomous agent harness.
 ## Before testing
 
 Open **Local AI → Assistant settings** and confirm that a small local model is
-selected. Keep any shared runtime used by Codex or Local Transcript running.
+selected. Choose **Preferred harness**, or keep **Choose each time** if the
+suggestion card should always ask. Keep any shared runtime used by Codex or
+Local Transcript running.
 Use this command in a terminal to watch service errors without exposing prompt
 content:
 
@@ -34,19 +36,21 @@ Expected: the panel usually stays at **Watching**. The assistant should prefer
 silence over vague advice and must respect its hourly and per-context limits.
 Record any repetitive or generic suggestion as a relevance failure.
 
-## 3. Suggestion-card UI without inference
+## 3. Real suggestion and quick actions
 
-Run the hidden developer fixture from the installed plugin directory:
+Keep the assistant on during ordinary non-sensitive work. When a real
+suggestion appears, confirm that it stays at the bottom right without taking
+keyboard focus. Try the fixed actions across separate suggestions:
 
-```bash
-~/.config/omarchy/plugins/gustav.local-ai/local-ai-copilot \
-  --config ~/.config/omarchy/local-ai-copilot.toml test-suggestion
-```
+- **Dismiss** closes it without another action.
+- **Copy draft** places the bounded draft on the clipboard.
+- **Remember** saves a small app-scoped hint to the local playbook.
+- **Continue in…** lists detected harnesses and highlights the preferred one.
 
-Expected: a non-focus-stealing card appears at the bottom right for roughly 45
-seconds. Test **Dismiss**, **Copy**, and **Remember** separately by running the
-fixture again before each action. **Delegate** is visible only when a heavy
-harness command is configured.
+Expected: the card disappears after the chosen action or its short expiry. It
+is valid for no card to appear during routine work: silence is the intended
+result when the model has no high-confidence help. The `test-suggestion` CLI
+command is an internal regression fixture and is not part of normal testing.
 
 ## 4. Native privacy picker
 
@@ -83,9 +87,10 @@ and model where possible.
 
 ## 7. Explicit heavy-harness handoff
 
-This test applies only after a fixed delegation command is configured. Show the
-synthetic suggestion, click **Delegate**, and verify that a visible terminal or
-chosen harness opens with a bounded prefilled task.
+On a real suggestion with a handoff goal, click **Continue in…**, select the
+preferred harness, and verify that a visible terminal opens with a bounded
+prefilled task. Repeat later with a non-default installed harness to verify the
+per-suggestion chooser.
 
 Expected: nothing is delegated before the click. The lightweight assistant does
 not inherit the heavy harness's tools or permissions, and it does not mutate the

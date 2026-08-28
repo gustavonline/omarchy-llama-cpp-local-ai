@@ -52,9 +52,9 @@ with:
 The **Always-on Assistant** section appears first in the same Local AI dropdown.
 It is off by default and uses one persistent toggle. The adjacent settings page
 discovers compatible models from active local Ollama and llama.cpp endpoints,
-lets the user choose suggestion frequency, window-title sharing, and extra
-blocked apps using a native installed-app picker, and saves a private
-machine-local configuration. Turning the toggle on enables a hardened
+lets the user choose suggestion frequency, a preferred installed harness,
+window-title sharing, and extra blocked apps using native controls, and saves a
+private machine-local configuration. Turning the toggle on enables a hardened
 systemd user service that starts after graphical login.
 
 The first version is deliberately light and quiet:
@@ -65,9 +65,10 @@ The first version is deliberately light and quiet:
   the selected local OpenAI-compatible endpoint.
 - Shows high-confidence suggestions in a non-focus-stealing card at the bottom
   right; supports dismiss, copy, and explicit editable playbook memory.
-- Can offer an explicit **Delegate** action when `pi-worker` or another fixed
-  heavy-harness command is configured. The light model cannot launch it by
-  itself.
+- Discovers installed Codex, Claude Code, Gemini CLI, Pi Worker, and Pi
+  commands. Each card can open a **Continue in…** chooser; the selected harness
+  receives only a bounded handoff prompt after the user clicks it. The light
+  model cannot launch a harness by itself.
 - Never takes screenshots, runs shell tools, or mutates the desktop in this
   release.
 
@@ -119,6 +120,23 @@ catalog; it never enters status, UI, audit logs, or the repository.
 Coding agents and other OpenAI-compatible clients remain separate consumers.
 Point them at the verified endpoint after the runtime reports healthy. Enabling
 The assistant does not reserve the endpoint for itself.
+
+### How proactive suggestions are produced
+
+The observer reads the active Hyprland application class, workspace, and—only
+when enabled—the filtered window title. Protected apps and sensitive title
+patterns are discarded before inference. After debounce and cooldown checks,
+an isolated Pi process sends that bounded metadata plus user-approved playbook
+hints to the selected local model. Pi starts offline with tools, extensions,
+skills, context files, and session memory disabled. The checked-in
+[`prompts/copilot-system.md`](prompts/copilot-system.md) asks for either silence
+or one strict JSON suggestion. The plugin validates its confidence and length,
+enforces hourly and per-context limits, and shows the result for a short time.
+
+The card's fixed actions are **Dismiss**, **Copy draft**, **Remember**, and
+**Continue in…**. They are implemented by the plugin, not invented by the
+model. `Remember` adds a small local playbook hint; `Continue in…` opens the
+chosen installed harness visibly with the bounded handoff prompt.
 
 ## Controls
 

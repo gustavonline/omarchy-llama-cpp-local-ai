@@ -7,7 +7,7 @@ jq -e '
   .schemaVersion == 1 and
   .id == "io.github.gustavonline.local-ai" and
   .name == "Local AI" and
-  .version == "0.8.0" and
+  .version == "0.9.0" and
   (.kinds | index("bar-widget")) != null and
   .entryPoints.barWidget == "Panel.qml"
 ' "$plugin_dir/manifest.json" >/dev/null
@@ -101,6 +101,8 @@ fi
 # controller. All model, Hyprland, Pi, and systemd dependencies are fake.
 copilot_root="$test_root/copilot"
 mkdir -p "$copilot_root"
+mkdir -p "$copilot_root/bin"
+ln -s "$plugin_dir/tests/fake-pi" "$copilot_root/bin/codex"
 mkdir -p "$copilot_root/data/applications"
 cat >"$copilot_root/data/applications/example-secret.desktop" <<'EOF'
 [Desktop Entry]
@@ -127,6 +129,7 @@ copilot_config="$copilot_root/config.toml"
 sed \
   -e "s#http://127.0.0.1:8080/v1#http://127.0.0.1:${port}/v1#" \
   -e 's#command = \["pi-worker", "--profile", "inspect", "--thinking", "low", "--no-web", "--"\]#command = []#' \
+  -e 's#launch_in_terminal = true#launch_in_terminal = false#' \
   -e "s#~/.config/omarchy/local-ai-copilot-playbook.json#${copilot_root}/playbook.json#" \
   "$plugin_dir/local-ai-copilot.example.toml" >"$copilot_config"
 
@@ -137,20 +140,30 @@ export LOCAL_AI_COPILOT_PI="$plugin_dir/tests/fake-pi"
 export LOCAL_AI_COPILOT_HYPRCTL="$plugin_dir/tests/fake-hyprctl"
 export LOCAL_AI_COPILOT_SYSTEMCTL="$plugin_dir/tests/fake-systemctl"
 export XDG_DATA_HOME="$copilot_root/data"
+export PATH="$copilot_root/bin:$PATH"
 
 model_choice="http://127.0.0.1:${port}/v1|test-local-model"
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" setup-state | jq -e \
   --arg choice "$model_choice" '
-  .configured and (.modelChoices | map(.value) | index($choice)) != null
+  .configured and
+  (.modelChoices | map(.value) | index($choice)) != null and
+  (.harnessChoices | map(.value) | index("codex")) != null
 ' >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" configure \
-  "$model_choice" 0.82 false '["org.example.Secret|example-secret"]' >/dev/null
+  "$model_choice" 0.82 false '["org.example.Secret|example-secret"]' codex >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" setup-state | jq -e \
   --arg choice "$model_choice" '
   .config.modelChoice == $choice and
   .config.minimumConfidence == 0.82 and
   (.config.shareWindowTitle | not) and
-  .config.blockedApps == ["org.example.Secret|example-secret"]
+  .config.blockedApps == ["org.example.Secret|example-secret"] and
+  .config.preferredHarness == "codex"
+' >/dev/null
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" status | jq -e '
+  .delegateAvailable and
+  .preferredHarness == "codex" and
+  .preferredHarnessLabel == "Codex" and
+  (.harnessChoices | map(.value) | index("codex")) != null
 ' >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" apps | jq -e '
   (map(select(.value == "org.example.Secret|example-secret" and .label == "Example Secret")) | length == 1) and
@@ -171,6 +184,13 @@ context='{"appId":"org.example.App","title":"Example document","workspace":"1"}'
 ' >/dev/null
 jq -e '.id and .context.appId == "org.example.App"' "$copilot_root/state/suggestion.json" >/dev/null
 
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" delegate codex >/dev/null
+jq -e 'length == 0' "$copilot_root/state/suggestion.json" >/dev/null
+tail -n 1 "$copilot_root/state/audit.jsonl" | jq -e '
+  .action == "delegated" and .harness == "codex"
+' >/dev/null
+
+"$plugin_dir/local-ai-copilot" --config "$copilot_config" evaluate --context-json "$context" >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" remember >/dev/null
 jq -e '.version == 1 and (.rules | length) == 1' "$copilot_root/playbook.json" >/dev/null
 "$plugin_dir/local-ai-copilot" --config "$copilot_config" test-suggestion >/dev/null
@@ -188,7 +208,10 @@ grep -q 'text: "LOCAL MODEL RUNTIME"' "$plugin_dir/Panel.qml"
 grep -q 'label: "Always-on Assistant"' "$plugin_dir/Panel.qml"
 grep -q 'text: root.settingsPage ? "Assistant settings" : "Local AI"' "$plugin_dir/Panel.qml"
 grep -q 'label: "Blocked apps"' "$plugin_dir/Panel.qml"
+grep -q 'label: "Preferred harness"' "$plugin_dir/Panel.qml"
+grep -q 'return "Continue in…  ▾"' "$plugin_dir/Panel.qml"
 grep -q 'WheelHandler {' "$plugin_dir/Panel.qml"
+grep -q 'policy: ScrollBar.AlwaysOff' "$plugin_dir/Panel.qml"
 grep -q 'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' "$plugin_dir/Panel.qml"
 grep -q -- '--no-tools' "$plugin_dir/local-ai-copilot"
 grep -q -- '--no-skills' "$plugin_dir/local-ai-copilot"
