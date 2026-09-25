@@ -1,4 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' '{"class":"org.example.App","title":"Example document","workspace":{"name":"1"}}'
 
+if [[ ${LOCAL_AI_ASSISTANT_FAKE_REQUIRE_HYPR_ENV:-} == 1 ]]; then
+  [[ ${XDG_RUNTIME_DIR:-} == "${LOCAL_AI_ASSISTANT_FAKE_HYPR_RUNTIME:?}" ]] || {
+    printf 'unexpected XDG_RUNTIME_DIR: %s\n' "${XDG_RUNTIME_DIR:-}" >&2
+    exit 1
+  }
+  [[ ${HYPRLAND_INSTANCE_SIGNATURE:-} == "${LOCAL_AI_ASSISTANT_FAKE_HYPR_SIGNATURE:?}" ]] || {
+    printf 'unexpected HYPRLAND_INSTANCE_SIGNATURE: %s\n' "${HYPRLAND_INSTANCE_SIGNATURE:-}" >&2
+    exit 1
+  }
+fi
+
+case " $* " in
+  *" -j clients "*)
+    printf '%s\n' '[{"title":"Local AI Suggestion","address":"0x123abc","mapped":true,"size":[340,320],"monitor":0}]'
+    ;;
+  *" -j monitors "*)
+    printf '%s\n' '[{"id":0,"x":0,"y":0,"width":2560,"height":1600,"scale":1.6}]'
+    ;;
+  *" dispatch hl.dsp.window.move"*)
+    if [[ -n ${LOCAL_AI_ASSISTANT_FAKE_WINDOW_LOG:-} ]]; then
+      printf '%s\n' "$*" >>"$LOCAL_AI_ASSISTANT_FAKE_WINDOW_LOG"
+    fi
+    printf '%s\n' 'ok'
+    ;;
+  *" dispatch focuswindow "*|*" dispatch hl.dsp.focus"*)
+    if [[ -n ${LOCAL_AI_ASSISTANT_FAKE_FOCUSED:-} ]]; then
+      printf 'focused\n' >"$LOCAL_AI_ASSISTANT_FAKE_FOCUSED"
+    fi
+    printf '%s\n' 'ok'
+    ;;
+  *" eval "*) printf '%s\n' 'ok' ;;
+  *" -j activewindow "*)
+    if [[ -n ${LOCAL_AI_ASSISTANT_FAKE_FOCUSED:-} && -f $LOCAL_AI_ASSISTANT_FAKE_FOCUSED ]]; then
+      printf '%s\n' '{"class":"local-ai","title":"Local AI Suggestion","workspace":{"name":"1"}}'
+    else
+      printf '%s\n' '{"class":"org.example.App","title":"Project roadmap document","workspace":{"name":"1"}}'
+    fi
+    ;;
+  *) printf '%s\n' '{"class":"org.example.App","title":"Project roadmap document","workspace":{"name":"1"}}' ;;
+esac

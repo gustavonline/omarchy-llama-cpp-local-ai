@@ -20,8 +20,8 @@ Panel {
   readonly property string controlPath: decodeURIComponent(
     String(Qt.resolvedUrl("local-ai-control")).replace(/^file:\/\//, "")
   )
-  readonly property string copilotControlPath: decodeURIComponent(
-    String(Qt.resolvedUrl("local-ai-copilot")).replace(/^file:\/\//, "")
+  readonly property string assistantControlPath: decodeURIComponent(
+    String(Qt.resolvedUrl("local-ai-assistant")).replace(/^file:\/\//, "")
   )
   readonly property string configFile: String(
     settings && settings.localConfigFile ? settings.localConfigFile : "~/.config/omarchy/local-ai.toml"
@@ -29,14 +29,12 @@ Panel {
   readonly property int refreshInterval: Math.max(5, Number(
     settings && settings.refreshIntervalSec ? settings.refreshIntervalSec : 10
   )) * 1000
-  readonly property string copilotConfigFile: String(
-    settings && settings.copilotConfigFile
-      ? settings.copilotConfigFile
-      : "~/.config/omarchy/local-ai-copilot.toml"
-  )
+  readonly property string assistantConfigFile: configFile
   readonly property string home: Quickshell.env("HOME") || ""
-  readonly property string defaultSuggestionPath: home + "/.local/state/omarchy/local-ai-copilot/suggestion.json"
-  readonly property string suggestionPath: String(copilotStatus.suggestionFile || defaultSuggestionPath)
+  readonly property string defaultSuggestionPath: home + "/.local/state/omarchy/local-ai-assistant/suggestion.json"
+  readonly property string suggestionPath: String(assistantStatus.suggestionFile || defaultSuggestionPath)
+  readonly property string voxtypeStatePath: String(Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000")
+    + "/voxtype/state"
   readonly property var hostWindow: button.QsWindow.window
 
   property var status: ({
@@ -51,51 +49,77 @@ Panel {
   property string pendingProfile: ""
   property bool cursorActive: false
   property bool settingsPage: false
-  property var copilotStatus: ({
+  property var assistantStatus: ({
     configured: false, configError: "", enabled: false, active: false, paused: false,
     state: "disabled", model: "auto", endpoint: "", lastError: "",
     suggestionFile: "", playbookFile: "", delegateAvailable: false,
     privacy: { windowTitle: true, screenshots: false, denyRules: 0 }
   })
   property var suggestion: ({})
-  property bool copilotBusy: false
-  property string copilotFeedback: ""
-  property bool copilotFeedbackIsError: false
-  property string copilotPendingAction: ""
-  property bool harnessMenuOpen: false
+  property bool assistantBusy: false
+  property string assistantFeedback: ""
+  property bool assistantFeedbackIsError: false
+  property string assistantPendingAction: ""
+  property bool suggestionHoldWanted: false
+  property bool suggestionHoldApplied: false
+  property bool suggestionWindowPrepared: false
+  property bool suggestionHovered: false
+  property bool suggestionFocused: false
   property double clockMs: Date.now()
   property string selectedModelChoice: ""
   property string selectedConfidence: "0.72"
-  property string selectedPreferredHarness: "auto"
+  property string selectedPreferredHarness: ""
+  property string summonPrompt: ""
   property bool selectedShareWindowTitle: true
   property var selectedBlockedApps: []
-  property var copilotModelOptions: []
-  property var copilotHarnessOptions: []
+  property var assistantModelOptions: []
+  property var assistantHarnessOptions: []
+  property int learnedDismissalCount: 0
+  property string voxtypeState: "idle"
+  property var dictationWaveform: []
+  property real dictationPeak: 0
+  property int voiceAnimationTick: 0
+  property bool suggestionPresented: false
+  property string cornerToastTitle: ""
+  property string cornerToastBody: ""
+  property bool cornerToastIsError: false
+  property bool cornerToastPresented: false
   readonly property var confidenceOptions: [
-    { value: "0.82", label: "Quiet", description: "Only very high-confidence suggestions" },
-    { value: "0.72", label: "Balanced", description: "Recommended" },
-    { value: "0.62", label: "More proactive", description: "More suggestions, including weaker ones" }
+    { value: "0.82", label: "Quiet", description: "Slow cadence · only very clear suggestions" },
+    { value: "0.72", label: "Balanced", description: "Recommended cadence and selectivity" },
+    { value: "0.62", label: "Proactive", description: "Faster checks · more concrete useful nudges" }
   ]
 
   readonly property bool running: status.state === "active"
   readonly property bool failed: status.state === "failed"
   readonly property string stateLabel: busy ? "Switching…" : (running ? "Running" : (failed ? "Failed" : "Stopped"))
-  readonly property bool copilotEnabled: copilotStatus.enabled === true
-  readonly property bool copilotActive: copilotStatus.active === true
-  readonly property bool copilotPaused: copilotStatus.paused === true
-  readonly property bool copilotFailed: copilotStatus.state === "error"
-    || String(copilotStatus.lastError || "") !== ""
+  readonly property bool assistantEnabled: assistantStatus.enabled === true
+  readonly property bool assistantActive: assistantStatus.active === true
+  readonly property bool assistantPaused: assistantStatus.paused === true
+  readonly property bool assistantFailed: assistantStatus.state === "error"
+    || String(assistantStatus.lastError || "") !== ""
   readonly property bool suggestionVisible: String((suggestion || {}).id || "") !== ""
-    && Number((suggestion || {}).expiresAt || 0) * 1000 > clockMs
-  readonly property string copilotStateLabel: {
-    if (copilotBusy) return "Updating…"
-    if (!copilotStatus.configured) return "Setup needed"
-    if (!copilotEnabled) return "Off"
-    if (copilotPaused) return "Paused"
-    if (copilotStatus.state === "thinking") return "Thinking…"
-    if (copilotStatus.state === "suggesting") return "Suggestion ready"
-    if (copilotFailed) return "Needs attention"
-    if (copilotActive) return "Watching"
+    && ((suggestion || {}).held === true || Number((suggestion || {}).expiresAt || 0) * 1000 > clockMs)
+  readonly property bool summonMode: String((suggestion || {}).mode || "") === "summon"
+  readonly property bool voiceMode: String((suggestion || {}).mode || "") === "voice"
+  readonly property bool directMode: String((suggestion || {}).mode || "") === "direct"
+  readonly property bool suggestionInteracting: suggestionHovered || suggestionFocused
+  readonly property bool summonAwaitingInput: summonMode && (suggestion || {}).awaitingInput === true
+  readonly property bool dictationRecording: voxtypeState === "recording"
+  readonly property bool dictationTranscribing: voxtypeState === "streaming"
+    || voxtypeState === "transcribing"
+  readonly property bool voiceThinking: voiceMode && assistantStatus.state === "thinking"
+  readonly property color voiceActivityColor: dictationRecording ? accent
+    : (voiceThinking ? Qt.lighter(accent, 1.28) : foreground)
+  readonly property string assistantStateLabel: {
+    if (assistantBusy) return "Updating…"
+    if (!assistantStatus.configured) return "Setup needed"
+    if (!assistantEnabled) return "Off"
+    if (assistantPaused) return "Paused"
+    if (assistantStatus.state === "thinking") return "Thinking…"
+    if (assistantStatus.state === "suggesting") return "Suggestion ready"
+    if (assistantFailed) return "Needs attention"
+    if (assistantActive) return "Watching"
     return "Waiting"
   }
 
@@ -106,10 +130,21 @@ Panel {
 
   function activeDetail() {
     var parts = []
-    if (status.label && status.label !== status.model) parts.push(String(status.label))
+    if (status.model) parts.push(String(status.model))
     if (status.variant) parts.push(String(status.variant))
     if (status.context) parts.push(String(status.context) + " context")
     return parts.length > 0 ? parts.join(" · ") : String(status.detail || "Local runtime")
+  }
+
+  function voiceBarHeight(index) {
+    if (dictationRecording) {
+      var samples = dictationWaveform || []
+      var sampleIndex = Math.max(0, samples.length - 4 + index)
+      var sample = sampleIndex < samples.length ? Number(samples[sampleIndex] || 0) : 0
+      return Math.max(Style.space(3), Math.min(Style.space(12), Style.space(3) + sample * Style.space(15)))
+    }
+    var pulse = [4, 7, 11, 7]
+    return Style.space(pulse[(voiceAnimationTick + index) % pulse.length])
   }
 
   visible: true
@@ -118,7 +153,7 @@ Panel {
 
   function refresh() {
     if (!statusProcess.running) statusProcess.running = true
-    if (!copilotStatusProcess.running) copilotStatusProcess.running = true
+    if (!assistantStatusProcess.running) assistantStatusProcess.running = true
   }
 
   function clearFeedback() {
@@ -164,91 +199,152 @@ Panel {
     openConfigProcess.running = true
   }
 
-  function clearCopilotFeedback() {
-    copilotFeedbackTimer.stop()
-    copilotFeedback = ""
-    copilotFeedbackIsError = false
+  function clearAssistantFeedback() {
+    assistantFeedbackTimer.stop()
+    assistantFeedback = ""
+    assistantFeedbackIsError = false
   }
 
-  function showCopilotFeedback(message) {
-    copilotFeedback = message
-    copilotFeedbackIsError = false
-    copilotFeedbackTimer.restart()
+  function showAssistantFeedback(message) {
+    assistantFeedback = message
+    assistantFeedbackIsError = false
+    assistantFeedbackTimer.restart()
   }
 
-  function showCopilotError(message) {
-    copilotFeedback = message
-    copilotFeedbackIsError = true
-    copilotFeedbackTimer.stop()
+  function showAssistantError(message) {
+    assistantFeedback = message
+    assistantFeedbackIsError = true
+    assistantFeedbackTimer.stop()
   }
 
-  function runCopilotAction(action, argument) {
-    if (copilotActionProcess.running) return
-    copilotBusy = true
-    copilotPendingAction = action
-    if (action === "delegate") harnessMenuOpen = false
-    clearCopilotFeedback()
-    copilotActionProcess.command = [copilotControlPath, "--config", copilotConfigFile, action]
+  function showCornerToast(title, body, isError) {
+    cornerToastTimer.stop()
+    cornerToastClearTimer.stop()
+    cornerToastTitle = String(title || "Local AI")
+    cornerToastBody = String(body || "")
+    cornerToastIsError = isError === true
+    cornerToastPresented = false
+    Qt.callLater(function() { root.cornerToastPresented = true })
+    cornerToastTimer.restart()
+  }
+
+  function hideCornerToast() {
+    cornerToastTimer.stop()
+    cornerToastPresented = false
+    cornerToastClearTimer.restart()
+  }
+
+  function runAssistantAction(action, argument) {
+    if (assistantActionProcess.running) return
+    assistantBusy = true
+    assistantPendingAction = action
+    clearAssistantFeedback()
+    assistantActionProcess.command = [assistantControlPath, "--config", assistantConfigFile, action]
     if (action === "configure") {
-      copilotActionProcess.command.push(selectedModelChoice)
-      copilotActionProcess.command.push(selectedConfidence)
-      copilotActionProcess.command.push(selectedShareWindowTitle ? "true" : "false")
-      copilotActionProcess.command.push(JSON.stringify(selectedBlockedApps))
-      copilotActionProcess.command.push(selectedPreferredHarness)
+      assistantActionProcess.command.push(selectedModelChoice)
+      assistantActionProcess.command.push(selectedConfidence)
+      assistantActionProcess.command.push(selectedShareWindowTitle ? "true" : "false")
+      assistantActionProcess.command.push(JSON.stringify(selectedBlockedApps))
+      assistantActionProcess.command.push(selectedPreferredHarness)
     }
-    if (action === "delegate" && argument) copilotActionProcess.command.push(String(argument))
-    copilotActionProcess.running = true
+    if ((action === "delegate" || action === "ask") && argument) {
+      assistantActionProcess.command.push(String(argument))
+    }
+    assistantActionProcess.running = true
   }
 
-  function refreshCopilotSetup() {
-    if (!copilotSetupProcess.running) copilotSetupProcess.running = true
+  function dismissSuggestion() {
+    if (suggestionDismissProcess.running || String((suggestion || {}).id || "") === "") return
+    suggestionDismissProcess.command = [
+      assistantControlPath, "--config", assistantConfigFile, "dismiss"
+    ]
+    suggestionDismissProcess.running = true
   }
 
-  function applyCopilotSetup(value) {
+  function submitSummon() {
+    var request = summonPrompt.trim()
+    if (request === "" || assistantActionProcess.running) return
+    runAssistantAction("ask", request)
+  }
+
+  function setSuggestionHeld(held) {
+    if (String((suggestion || {}).id || "") === "") return
+    suggestionHoldWanted = held
+    if (!suggestionHoldProcess.running) flushSuggestionHold()
+  }
+
+  function flushSuggestionHold() {
+    suggestionHoldProcess.requestedHeld = suggestionHoldWanted
+    suggestionHoldProcess.command = [
+      assistantControlPath,
+      "--config",
+      assistantConfigFile,
+      suggestionHoldWanted ? "hold-suggestion" : "release-suggestion"
+    ]
+    suggestionHoldProcess.running = true
+  }
+
+  function refreshAssistantSetup() {
+    if (!assistantSetupProcess.running) assistantSetupProcess.running = true
+  }
+
+  function applyAssistantSetup(value) {
     if (!value || typeof value !== "object") return
     var config = value.config || {}
-    copilotModelOptions = Array.isArray(value.modelChoices) ? value.modelChoices : []
-    copilotHarnessOptions = Array.isArray(value.harnessChoices) ? value.harnessChoices : []
+    assistantModelOptions = Array.isArray(value.modelChoices) ? value.modelChoices : []
+    assistantHarnessOptions = Array.isArray(value.harnessChoices) ? value.harnessChoices : []
+    learnedDismissalCount = Number(value.dismissedSuggestionCount || 0)
     selectedModelChoice = String(config.modelChoice || "")
     selectedConfidence = Number(config.minimumConfidence || 0.72).toFixed(2)
-    selectedPreferredHarness = String(config.preferredHarness || "auto")
+    selectedPreferredHarness = String(config.preferredHarness || "")
     selectedShareWindowTitle = config.shareWindowTitle === undefined
       ? true : Boolean(config.shareWindowTitle)
     selectedBlockedApps = Array.isArray(config.blockedApps) ? config.blockedApps : []
   }
 
-  function saveCopilotSetup() {
+  function saveAssistantSetup() {
     if (selectedModelChoice === "") {
-      showCopilotError("Choose a local assistant model")
+      showAssistantError("Choose a local assistant model")
       return
     }
-    runCopilotAction("configure")
+    if (selectedPreferredHarness === "") {
+      showAssistantError("Choose a preferred harness")
+      return
+    }
+    runAssistantAction("configure")
   }
 
-  function currentCopilotModelLabel() {
-    var selected = copilotModelOptions.find(function(option) {
+  function currentAssistantModelLabel() {
+    var selected = assistantModelOptions.find(function(option) {
       return String(option.value || "") === selectedModelChoice
     })
     return selected ? String(selected.label || selected.model || "Local model")
-      : String(copilotStatus.modelLabel || copilotStatus.model || "Local model")
+      : String(assistantStatus.modelLabel || assistantStatus.model || "Local model")
   }
 
   function preferredHarnessLabel() {
-    var preferred = String(copilotStatus.preferredHarness || selectedPreferredHarness || "auto")
-    if (preferred === "auto") return ""
-    var options = Array.isArray(copilotStatus.harnessChoices) ? copilotStatus.harnessChoices : []
+    var preferred = String(assistantStatus.preferredHarness || selectedPreferredHarness || "")
+    var options = Array.isArray(assistantStatus.harnessChoices) ? assistantStatus.harnessChoices : []
     var selected = options.find(function(option) { return String(option.value || "") === preferred })
-    return selected ? String(selected.label || "") : String(copilotStatus.preferredHarnessLabel || "")
+    return selected ? String(selected.label || "") : String(assistantStatus.preferredHarnessLabel || "")
   }
 
   function continueButtonLabel() {
     var label = preferredHarnessLabel()
-    return label === "" ? "Continue in…  ▾" : "Continue in " + label + "  ▾"
+    return label === "" ? "Continue" : "Continue in " + label
   }
 
-  function applyCopilotStatus(value) {
+  function dismissButtonLabel() {
+    if (suggestionHoldWanted || (suggestion || {}).held === true) return "Dismiss · paused"
+    var remaining = Math.max(0, Math.ceil(
+      (Number((suggestion || {}).expiresAt || 0) * 1000 - clockMs) / 1000
+    ))
+    return "Dismiss · " + remaining + "s"
+  }
+
+  function applyAssistantStatus(value) {
     if (!value || typeof value !== "object") return
-    copilotStatus = value
+    assistantStatus = value
     if (value.suggestion && value.suggestion.id) suggestion = value.suggestion
     suggestionFile.reload()
   }
@@ -256,16 +352,39 @@ Panel {
   function applySuggestion(text) {
     try {
       var value = JSON.parse(String(text || "{}"))
-      var nextId = value && typeof value === "object" ? String(value.id || "") : ""
-      if (nextId !== String(suggestion.id || "")) harnessMenuOpen = false
+      var previousId = String((suggestion || {}).id || "")
       suggestion = value && typeof value === "object" ? value : ({})
+      if (String((suggestion || {}).id || "") !== previousId) summonPrompt = ""
     } catch (error) {
       suggestion = ({})
-      harnessMenuOpen = false
     }
   }
 
-  function copilotSuccessMessage(action) {
+  function applyVoxtypeState(text) {
+    var value = String(text || "idle").trim().toLowerCase()
+    voxtypeState = value === "recording" || value === "streaming" || value === "transcribing"
+      ? value : "idle"
+    if (voxtypeState === "idle") {
+      dictationWaveform = []
+      dictationPeak = 0
+    }
+  }
+
+  function applyAudioFrame(line) {
+    try {
+      var value = JSON.parse(String(line || ""))
+      if (typeof value.peak !== "number") return
+      dictationPeak = Math.max(0, Math.min(1, value.peak))
+      var samples = dictationWaveform.slice()
+      samples.push(dictationPeak)
+      while (samples.length > 42) samples.shift()
+      dictationWaveform = samples
+    } catch (error) {
+      // The bridge can emit connection messages as well as audio frames.
+    }
+  }
+
+  function assistantSuccessMessage(action) {
     if (action === "enable") return "Assistant enabled"
     if (action === "disable") return "Assistant disabled"
     if (action === "pause") return "Assistant paused"
@@ -273,7 +392,10 @@ Panel {
     if (action === "dismiss") return "Suggestion dismissed"
     if (action === "copy") return "Suggestion copied"
     if (action === "remember") return "Playbook rule saved"
-    if (action === "delegate") return "Task opened in the heavy harness"
+    if (action === "delegate") return "Handoff ready · path copied"
+    if (action === "ask") return "Local response ready"
+    if (action === "clear-feedback") return "Learned dismissals reset"
+    if (action === "open-memory") return "Learned memory opened"
     if (action === "test-suggestion") return "Test suggestion shown"
     if (action === "restart") return "Assistant restarted"
     if (action === "edit-settings") return "Assistant settings opened"
@@ -284,13 +406,21 @@ Panel {
   onOpenedChanged: if (opened) {
     cursorActive = false
     clearFeedback()
-    clearCopilotFeedback()
+    clearAssistantFeedback()
     refresh()
-    if (settingsPage) refreshCopilotSetup()
+    if (settingsPage) refreshAssistantSetup()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    refresh()
+    suggestionRuleProcess.running = true
+  }
+
+  onSuggestionVisibleChanged: if (suggestionVisible) suggestionPlacementTimer.restart()
+  onSuggestionWindowPreparedChanged: if (suggestionWindowPrepared && suggestionVisible) {
+    suggestionPlacementTimer.restart()
+  }
 
   Timer {
     interval: root.refreshInterval
@@ -324,20 +454,52 @@ Panel {
   }
 
   Timer {
-    id: copilotFeedbackTimer
+    interval: 110
+    running: root.voiceMode
+    repeat: true
+    onTriggered: root.voiceAnimationTick = (root.voiceAnimationTick + 1) % 4
+  }
+
+  Timer {
+    id: assistantFeedbackTimer
     interval: 3500
     repeat: false
     onTriggered: {
-      root.copilotFeedback = ""
-      root.copilotFeedbackIsError = false
+      root.assistantFeedback = ""
+      root.assistantFeedbackIsError = false
     }
   }
 
   Timer {
-    id: copilotActionRefresh
+    id: cornerToastTimer
+    interval: 3600
+    repeat: false
+    onTriggered: root.hideCornerToast()
+  }
+
+  Timer {
+    id: cornerToastClearTimer
+    interval: 220
+    repeat: false
+    onTriggered: {
+      root.cornerToastTitle = ""
+      root.cornerToastBody = ""
+      root.cornerToastIsError = false
+    }
+  }
+
+  Timer {
+    id: assistantActionRefresh
     interval: 600
     repeat: false
     onTriggered: root.refresh()
+  }
+
+  Timer {
+    id: suggestionPlacementTimer
+    interval: 60
+    repeat: false
+    onTriggered: if (!suggestionPlacementProcess.running) suggestionPlacementProcess.running = true
   }
 
   FileView {
@@ -347,6 +509,29 @@ Panel {
     printErrors: false
     onLoaded: root.applySuggestion(text())
     onFileChanged: reload()
+  }
+
+  FileView {
+    id: voxtypeStateFile
+    path: root.voxtypeStatePath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.applyVoxtypeState(text())
+    onFileChanged: reload()
+  }
+
+  Process {
+    id: dictationAudioBridge
+    command: ["voxtype-audio-bridge"]
+    running: root.dictationRecording && root.voiceMode
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(data) { root.applyAudioFrame(data) }
+    }
+    onRunningChanged: if (!running) {
+      root.dictationWaveform = []
+      root.dictationPeak = 0
+    }
   }
 
   Process {
@@ -413,69 +598,128 @@ Panel {
   }
 
   Process {
-    id: copilotStatusProcess
+    id: assistantStatusProcess
     running: false
-    command: [root.copilotControlPath, "--config", root.copilotConfigFile, "status"]
+    command: [root.assistantControlPath, "--config", root.assistantConfigFile, "status"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
-          root.applyCopilotStatus(JSON.parse(String(text || "{}")))
+          root.applyAssistantStatus(JSON.parse(String(text || "{}")))
         } catch (error) {
-          root.showCopilotError("Could not read assistant status")
+          root.showAssistantError("Could not read assistant status")
         }
       }
     }
-    stderr: StdioCollector { id: copilotStatusError; waitForEnd: true }
+    stderr: StdioCollector { id: assistantStatusError; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        var detail = String(copilotStatusError.text || "Could not read assistant status").trim()
-        root.showCopilotError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
+        var detail = String(assistantStatusError.text || "Could not read assistant status").trim()
+        root.showAssistantError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
       }
     }
   }
 
   Process {
-    id: copilotSetupProcess
+    id: assistantSetupProcess
     running: false
-    command: [root.copilotControlPath, "--config", root.copilotConfigFile, "setup-state"]
+    command: [root.assistantControlPath, "--config", root.assistantConfigFile, "setup-state"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
-          root.applyCopilotSetup(JSON.parse(String(text || "{}")))
+          root.applyAssistantSetup(JSON.parse(String(text || "{}")))
         } catch (error) {
-          root.showCopilotError("Could not read assistant settings")
+          root.showAssistantError("Could not read assistant settings")
         }
       }
     }
-    stderr: StdioCollector { id: copilotSetupError; waitForEnd: true }
+    stderr: StdioCollector { id: assistantSetupError; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        var detail = String(copilotSetupError.text || "Could not read assistant settings").trim()
-        root.showCopilotError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
+        var detail = String(assistantSetupError.text || "Could not read assistant settings").trim()
+        root.showAssistantError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
       }
     }
   }
 
   Process {
-    id: copilotActionProcess
+    id: assistantActionProcess
     running: false
-    stdout: StdioCollector { id: copilotActionOutput; waitForEnd: true }
-    stderr: StdioCollector { id: copilotActionError; waitForEnd: true }
+    stdout: StdioCollector { id: assistantActionOutput; waitForEnd: true }
+    stderr: StdioCollector { id: assistantActionError; waitForEnd: true }
     onExited: function(exitCode) {
-      root.copilotBusy = false
-      if (exitCode === 0) root.showCopilotFeedback(root.copilotSuccessMessage(root.copilotPendingAction))
-      else {
-        var detail = String(copilotActionError.text || copilotActionOutput.text || "Assistant action failed").trim()
-        root.showCopilotError(detail.length > 220 ? detail.slice(0, 217) + "…" : detail)
+      root.assistantBusy = false
+      var completedAction = root.assistantPendingAction
+      if (exitCode === 0) {
+        root.showAssistantFeedback(root.assistantSuccessMessage(completedAction))
+        if (completedAction === "delegate") {
+          var harness = root.preferredHarnessLabel()
+          root.showCornerToast(
+            harness === "" ? "Handoff ready" : "Opened " + harness,
+            "SESSION.md path copied to clipboard",
+            false
+          )
+        } else if (completedAction === "copy") {
+          root.showCornerToast("Response copied", "Ready to paste", false)
+        }
+      } else {
+        var detail = String(assistantActionError.text || assistantActionOutput.text || "Assistant action failed").trim()
+        root.showAssistantError(detail.length > 220 ? detail.slice(0, 217) + "…" : detail)
+        if (completedAction === "delegate" || completedAction === "copy") {
+          root.showCornerToast(
+            completedAction === "delegate" ? "Handoff failed" : "Copy failed",
+            detail.length > 140 ? detail.slice(0, 137) + "…" : detail,
+            true
+          )
+        }
       }
-      if (exitCode === 0 && root.copilotPendingAction === "configure") {
-        root.settingsPage = false
-        root.refreshCopilotSetup()
+      if (exitCode === 0 && (completedAction === "configure"
+          || completedAction === "clear-feedback")) {
+        if (completedAction === "configure") root.settingsPage = false
+        root.refreshAssistantSetup()
       }
-      root.copilotPendingAction = ""
-      copilotActionRefresh.restart()
+      root.assistantPendingAction = ""
+      assistantActionRefresh.restart()
+      suggestionFile.reload()
+    }
+  }
+
+  Process {
+    id: suggestionDismissProcess
+    running: false
+    stderr: StdioCollector { id: suggestionDismissError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        var detail = String(suggestionDismissError.text || "Could not dismiss Local AI").trim()
+        root.showAssistantError(detail.length > 180 ? detail.slice(0, 177) + "…" : detail)
+      }
+      suggestionFile.reload()
+    }
+  }
+
+  Process {
+    id: suggestionRuleProcess
+    running: false
+    command: [root.assistantControlPath, "--config", root.assistantConfigFile, "prepare-window"]
+    onExited: function(exitCode) { root.suggestionWindowPrepared = exitCode === 0 }
+  }
+
+  Process {
+    id: suggestionPlacementProcess
+    running: false
+    command: [root.assistantControlPath, "--config", root.assistantConfigFile, "place-window"]
+  }
+
+  Process {
+    id: suggestionHoldProcess
+    property bool requestedHeld: false
+    running: false
+    onExited: function(exitCode) {
+      root.suggestionHoldApplied = requestedHeld
+      if (root.suggestionHoldWanted !== root.suggestionHoldApplied) {
+        Qt.callLater(function() { root.flushSuggestionHold() })
+      }
       suggestionFile.reload()
     }
   }
@@ -491,24 +735,64 @@ Panel {
     function start(profile: string): string { root.runAction("start", profile); return "ok" }
     function stop(): string { root.runAction("stop", ""); return "ok" }
     function restart(): string { root.runAction("restart", ""); return "ok" }
-    function enableCopilot(): string { root.runCopilotAction("enable"); return "ok" }
-    function disableCopilot(): string { root.runCopilotAction("disable"); return "ok" }
-    function pauseCopilot(): string { root.runCopilotAction("pause"); return "ok" }
-    function resumeCopilot(): string { root.runCopilotAction("resume"); return "ok" }
+    function enableAssistant(): string { root.runAssistantAction("enable"); return "ok" }
+    function disableAssistant(): string { root.runAssistantAction("disable"); return "ok" }
+    function pauseAssistant(): string { root.runAssistantAction("pause"); return "ok" }
+    function resumeAssistant(): string { root.runAssistantAction("resume"); return "ok" }
     function status(): string { return root.stateLabel }
+  }
+
+  Component {
+    id: voiceIndicatorComponent
+
+    Item {
+      Row {
+        width: implicitWidth
+        height: Style.space(14)
+        anchors.centerIn: parent
+        spacing: Style.space(2)
+
+        Repeater {
+          model: 4
+
+          Rectangle {
+            required property int index
+            width: Style.space(3)
+            height: root.voiceBarHeight(index)
+            y: (parent.height - height) / 2
+            radius: width / 2
+            color: root.voiceActivityColor
+            opacity: root.dictationRecording ? 1 : (root.voiceThinking ? 0.92 : 0.72)
+
+            Behavior on height {
+              NumberAnimation { duration: 90; easing.type: Easing.OutQuad }
+            }
+
+            Behavior on opacity {
+              NumberAnimation { duration: 140; easing.type: Easing.OutQuad }
+            }
+          }
+        }
+      }
+    }
   }
 
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰍛"
-    tooltipText: "Local AI · Runtime " + root.stateLabel + " · Assistant " + root.copilotStateLabel
-    active: root.running || (root.copilotActive && !root.copilotPaused)
+    text: root.voiceMode ? "" : "󰍛"
+    iconComponent: root.voiceMode ? voiceIndicatorComponent : null
+    tooltipText: root.voiceMode
+      ? (root.dictationRecording ? "Local AI · Listening — release SUPER+A to send"
+        : (root.assistantStatus.state === "thinking" ? "Local AI · Thinking…" : "Local AI · Transcribing…"))
+      : "Local AI · Runtime " + root.stateLabel + " · Assistant " + root.assistantStateLabel
+    active: root.running || (root.assistantActive && !root.assistantPaused)
     useActiveColor: false
 
     Rectangle {
-      visible: root.running || root.copilotEnabled || root.failed || root.copilotFailed
+      visible: !root.voiceMode
+        && (root.running || root.assistantEnabled || root.failed || root.assistantFailed)
       width: root.running ? Style.space(5) : Style.space(4)
       height: width
       radius: width / 2
@@ -516,8 +800,8 @@ Panel {
       anchors.bottom: parent.bottom
       anchors.rightMargin: Style.space(2)
       anchors.bottomMargin: Style.space(2)
-      color: root.failed || root.copilotFailed ? Color.urgent
-        : (root.copilotPaused && !root.running ? root.dim : root.accent)
+      color: root.failed || root.assistantFailed ? Color.urgent
+        : (root.assistantPaused && !root.running ? root.dim : root.accent)
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.runAction(root.running ? "stop" : "start", "")
@@ -601,9 +885,9 @@ Panel {
               Text {
                 width: parent.width
                 visible: !root.settingsPage
-                text: (root.copilotEnabled ? "Assistant on" : "Assistant off")
+                text: (root.assistantEnabled ? "Assistant on" : "Assistant off")
                   + " · " + (root.running ? "Runtime running" : "Runtime stopped")
-                color: root.copilotEnabled ? root.accent : root.dim
+                color: root.assistantEnabled ? root.accent : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
@@ -623,8 +907,8 @@ Panel {
               onClicked: {
                 root.settingsPage = !root.settingsPage
                 panelContent.contentY = 0
-                root.clearCopilotFeedback()
-                if (root.settingsPage) root.refreshCopilotSetup()
+                root.clearAssistantFeedback()
+                if (root.settingsPage) root.refreshAssistantSetup()
                 else root.refresh()
               }
             }
@@ -647,24 +931,24 @@ Panel {
             Toggle {
               width: parent.width
               label: "Always-on Assistant"
-              description: !root.copilotStatus.configured
+              description: !root.assistantStatus.configured
                 ? "Open settings to choose a small local model"
-                : root.currentCopilotModelLabel() + " · " + root.copilotStateLabel
-              checked: root.copilotEnabled
+                : root.currentAssistantModelLabel() + " · " + root.assistantStateLabel
+              checked: root.assistantEnabled
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
-              enabled: root.copilotStatus.configured && !root.copilotBusy
-              onClicked: root.runCopilotAction(root.copilotEnabled ? "disable" : "enable")
+              enabled: root.assistantStatus.configured && !root.assistantBusy
+              onClicked: root.runAssistantAction(root.assistantEnabled ? "disable" : "enable")
             }
 
             Text {
-              visible: root.copilotFeedback !== "" || root.copilotFailed
+              visible: root.assistantFeedback !== "" || root.assistantFailed
               width: parent.width
-              text: root.copilotFeedback !== ""
-                ? root.copilotFeedback
-                : String(root.copilotStatus.lastError || "")
-              color: root.copilotFeedbackIsError || root.copilotFailed ? root.urgent : root.accent
+              text: root.assistantFeedback !== ""
+                ? root.assistantFeedback
+                : String(root.assistantStatus.lastError || "")
+              color: root.assistantFeedbackIsError || root.assistantFailed ? root.urgent : root.accent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               horizontalAlignment: Text.AlignHCenter
@@ -690,7 +974,7 @@ Panel {
                 anchors.right: runtimeState.left
                 anchors.rightMargin: Style.spacing.md
                 anchors.verticalCenter: parent.verticalCenter
-                text: String(root.status.model || root.status.label || "No model running")
+                text: String(root.status.label || root.status.model || "No model running")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -786,11 +1070,9 @@ Panel {
 
             Row {
               width: parent.width
-              spacing: Style.spacing.md
-              readonly property real cellWidth: (width - spacing) / 2
 
               Button {
-                width: parent.cellWidth
+                width: parent.width
                 text: "Copy endpoint"
                 enabled: String(root.status.endpoint || "") !== ""
                 bordered: false
@@ -799,18 +1081,6 @@ Panel {
                 fontSize: Style.font.bodySmall
                 verticalPadding: Style.spacing.controlPaddingY
                 onClicked: root.copyEndpoint()
-              }
-
-              Button {
-                width: parent.cellWidth
-                text: "Edit profiles"
-                enabled: String(root.status.configFile || root.configFile) !== ""
-                bordered: false
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                fontSize: Style.font.bodySmall
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: root.openConfig()
               }
             }
 
@@ -843,7 +1113,7 @@ Panel {
               width: parent.width
               label: "Assistant model"
               value: root.selectedModelChoice
-              options: root.copilotModelOptions
+              options: root.assistantModelOptions
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
@@ -851,7 +1121,7 @@ Panel {
             }
 
             Text {
-              visible: root.copilotModelOptions.length === 0
+              visible: root.assistantModelOptions.length === 0
               width: parent.width
               text: "No compatible local model endpoint is currently available."
               color: root.urgent
@@ -872,7 +1142,7 @@ Panel {
               width: parent.width
               label: "Preferred harness"
               value: root.selectedPreferredHarness
-              options: root.copilotHarnessOptions
+              options: root.assistantHarnessOptions
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
@@ -914,7 +1184,7 @@ Panel {
               width: parent.width
               label: "Blocked apps"
               values: root.selectedBlockedApps
-              optionsCommand: [root.copilotControlPath, "--config", root.copilotConfigFile, "apps"]
+              optionsCommand: [root.assistantControlPath, "--config", root.assistantConfigFile, "apps"]
               placeholderText: "Search installed apps…"
               noSelectionText: "No extra apps blocked"
               emptyText: "No installed apps found"
@@ -942,35 +1212,72 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
+            Row {
+              width: parent.width
+              spacing: Style.spacing.md
+              readonly property real cellWidth: (width - spacing) / 2
+
+              Button {
+                width: parent.cellWidth
+                text: "View memory"
+                iconText: "󰈙"
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                horizontalPadding: Style.space(7)
+                verticalPadding: Style.space(5)
+                bordered: true
+                enabled: !root.assistantBusy
+                onClicked: root.runAssistantAction("open-memory")
+              }
+
+              Button {
+                width: parent.cellWidth
+                text: "Reset · " + root.learnedDismissalCount
+                iconText: "󰑓"
+                foreground: root.dim
+                accent: root.accent
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                horizontalPadding: Style.space(7)
+                verticalPadding: Style.space(5)
+                bordered: true
+                enabled: !root.assistantBusy && root.learnedDismissalCount > 0
+                onClicked: root.runAssistantAction("clear-feedback")
+              }
+            }
+
             Button {
               width: parent.width
-              text: root.copilotBusy && root.copilotPendingAction === "configure" ? "Saving…" : "Save"
-              iconText: root.copilotBusy && root.copilotPendingAction === "configure" ? "󰦖" : "✓"
-              iconSpinning: root.copilotBusy && root.copilotPendingAction === "configure"
+              text: root.assistantBusy && root.assistantPendingAction === "configure" ? "Saving…" : "Save"
+              iconText: root.assistantBusy && root.assistantPendingAction === "configure" ? "󰦖" : "✓"
+              iconSpinning: root.assistantBusy && root.assistantPendingAction === "configure"
               foreground: root.accent
               accent: root.accent
               fontFamily: root.fontFamily
               bordered: true
-              enabled: !root.copilotBusy && root.selectedModelChoice !== ""
-              onClicked: root.saveCopilotSetup()
+              enabled: !root.assistantBusy && root.selectedModelChoice !== ""
+                && root.selectedPreferredHarness !== ""
+              onClicked: root.saveAssistantSetup()
             }
 
             Button {
               width: parent.width
-              text: "Open advanced config"
+              text: "Open full Local AI config"
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
               bordered: false
-              enabled: !root.copilotBusy
-              onClicked: root.runCopilotAction("edit-settings")
+              enabled: !root.assistantBusy
+              onClicked: root.openConfig()
             }
 
             Text {
-              visible: root.copilotFeedback !== ""
+              visible: root.assistantFeedback !== ""
               width: parent.width
-              text: root.copilotFeedback
-              color: root.copilotFeedbackIsError ? root.urgent : root.accent
+              text: root.assistantFeedback
+              color: root.assistantFeedbackIsError ? root.urgent : root.accent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               horizontalAlignment: Text.AlignHCenter
@@ -985,52 +1292,214 @@ Panel {
   }
 
   PanelWindow {
-    id: suggestionWindow
-    visible: root.suggestionVisible
+    id: cornerFeedbackWindow
     screen: root.hostWindow ? root.hostWindow.screen : null
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
-    exclusionMode: ExclusionMode.Ignore
-    WlrLayershell.namespace: "local-ai-copilot-suggestion"
+    visible: root.cornerToastTitle !== ""
+
+    WlrLayershell.namespace: "local-ai-feedback"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-    mask: Region { item: suggestionCard }
+    exclusionMode: ExclusionMode.Ignore
+    color: "transparent"
+    anchors { top: true; bottom: true; left: true; right: true }
+    mask: Region { item: cornerToastCard }
+
+    BorderSurface {
+      id: cornerToastCard
+      width: Style.space(286)
+      height: cornerToastContent.implicitHeight + Style.space(20)
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      anchors.rightMargin: Style.gapsOut + Style.space(8)
+        + (root.bar && root.bar.position === "right" && root.hostWindow ? root.hostWindow.width : 0)
+      anchors.bottomMargin: Style.gapsOut + Style.space(8)
+        + (root.bar && root.bar.position === "bottom" && root.hostWindow ? root.hostWindow.height : 0)
+      color: Color.notifications.background
+      borderSpec: Border.surfaceSpec(
+        "notifications",
+        "border",
+        root.cornerToastIsError ? root.urgent : Color.notifications.border,
+        Math.max(1, Style.space(2))
+      )
+      radius: Style.cornerRadius
+      opacity: root.cornerToastPresented ? 1 : 0
+      scale: root.cornerToastPresented ? 1 : 0.96
+
+      transform: Translate {
+        y: root.cornerToastPresented ? 0 : Style.space(10)
+        Behavior on y {
+          NumberAnimation { duration: 190; easing.type: Easing.OutCubic }
+        }
+      }
+
+      Behavior on opacity {
+        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+      }
+
+      Behavior on scale {
+        NumberAnimation { duration: 190; easing.type: Easing.OutBack }
+      }
+
+      Row {
+        id: cornerToastContent
+        x: Style.space(10)
+        y: Style.space(10)
+        width: parent.width - Style.space(20)
+        spacing: Style.space(9)
+
+        Rectangle {
+          width: Style.space(24)
+          height: width
+          radius: width / 2
+          color: {
+            var tint = root.cornerToastIsError ? root.urgent : root.accent
+            return Qt.rgba(tint.r, tint.g, tint.b, 0.16)
+          }
+
+          Text {
+            anchors.centerIn: parent
+            text: root.cornerToastIsError ? "!" : "✓"
+            color: root.cornerToastIsError ? root.urgent : root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+        }
+
+        Column {
+          width: parent.width - Style.space(33)
+          spacing: Style.space(2)
+
+          Text {
+            width: parent.width
+            text: root.cornerToastTitle
+            color: Color.notifications.text
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Text {
+            visible: root.cornerToastBody !== ""
+            width: parent.width
+            text: root.cornerToastBody
+            color: Qt.darker(Color.notifications.text, 1.28)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+          }
+        }
+      }
+    }
+  }
+
+  FloatingWindow {
+    id: suggestionWindow
+    visible: root.suggestionVisible && root.suggestionWindowPrepared && !root.voiceMode
+    screen: root.hostWindow ? root.hostWindow.screen : null
+    title: "Local AI Suggestion"
+    implicitWidth: Style.space(340)
+    implicitHeight: Style.space(320)
+    minimumSize: Qt.size(Style.space(340), Style.space(320))
+    maximumSize: minimumSize
+    color: "transparent"
+    onClosed: root.dismissSuggestion()
+    onVisibleChanged: {
+      if (visible) {
+        root.suggestionPresented = false
+        Qt.callLater(function() { root.suggestionPresented = true })
+      } else {
+        root.suggestionPresented = false
+        root.suggestionHovered = false
+        root.suggestionFocused = false
+        suggestionFlick.contentY = 0
+      }
+    }
 
     BorderSurface {
       id: suggestionCard
-      width: Math.min(Style.space(410), suggestionWindow.width - Style.gapsOut * 2)
-      implicitHeight: suggestionContent.implicitHeight + borderTop + borderBottom + Style.space(24)
-      anchors.right: parent.right
-      anchors.bottom: parent.bottom
-      anchors.rightMargin: Style.gapsOut + (root.bar && root.bar.position === "right" ? root.bar.barSize : 0)
-      anchors.bottomMargin: Style.gapsOut + (root.bar && root.bar.position === "bottom" ? root.bar.barSize : 0)
+      anchors.fill: parent
       color: Color.notifications.background
       borderSpec: Border.surfaceSpec("notifications", "border", Color.notifications.border, Math.max(1, Style.space(2)))
       radius: Style.cornerRadius
       clip: true
+      opacity: root.suggestionPresented ? 1 : 0
+      scale: root.suggestionPresented ? 1 : 0.975
 
-      Column {
-        id: suggestionContent
+      transform: Translate {
+        y: root.suggestionPresented ? 0 : Style.space(8)
+        Behavior on y {
+          NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+        }
+      }
+
+      Behavior on opacity {
+        NumberAnimation { duration: 140; easing.type: Easing.OutQuad }
+      }
+
+      Behavior on scale {
+        NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+      }
+
+      HoverHandler {
+        id: suggestionHover
+        onHoveredChanged: {
+          root.suggestionHovered = hovered
+          root.setSuggestionHeld(hovered || suggestionCard.Window.active)
+        }
+      }
+
+      Window.onActiveChanged: {
+        root.suggestionFocused = Window.active
+        root.setSuggestionHeld(suggestionHover.hovered || Window.active)
+        if (Window.active) {
+          Qt.callLater(function() {
+            if (root.summonAwaitingInput) summonField.forceActiveFocus()
+            else suggestionFlick.forceActiveFocus()
+          })
+        }
+      }
+
+      Flickable {
+        id: suggestionFlick
+        anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: Style.space(12)
-        spacing: Style.space(8)
+        anchors.bottom: actionFooter.top
+        anchors.bottomMargin: Style.space(6)
+        contentWidth: width
+        contentHeight: suggestionContent.implicitHeight + Style.space(24)
+        boundsBehavior: Flickable.StopAtBounds
+        clip: true
+        activeFocusOnTab: true
+        Keys.onPressed: function(event) {
+          var maximum = Math.max(0, contentHeight - height)
+          if (event.key === Qt.Key_Escape) root.dismissSuggestion()
+          else if (event.key === Qt.Key_Up) contentY = Math.max(0, contentY - Style.space(36))
+          else if (event.key === Qt.Key_Down) contentY = Math.min(maximum, contentY + Style.space(36))
+          else if (event.key === Qt.Key_PageUp) contentY = Math.max(0, contentY - height * 0.75)
+          else if (event.key === Qt.Key_PageDown) contentY = Math.min(maximum, contentY + height * 0.75)
+          else return
+          event.accepted = true
+        }
+        ScrollBar.vertical: ScrollBar {
+          policy: root.suggestionInteracting && suggestionFlick.contentHeight > suggestionFlick.height
+            ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+        }
 
-        Row {
-          width: parent.width
+        Column {
+          id: suggestionContent
+          x: Style.space(12)
+          y: Style.space(12)
+          width: suggestionFlick.width - Style.space(24)
           spacing: Style.space(8)
 
           Text {
-            text: "󰚩"
-            color: Color.notifications.text
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.icon
-          }
-
-          Text {
-            width: parent.width - Style.space(34)
-            text: String(root.suggestion.title || "Local Assistant")
+            width: parent.width
+            text: String(root.suggestion.title || "Suggested next step")
             color: Color.notifications.text
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
@@ -1039,112 +1508,150 @@ Panel {
             maximumLineCount: 2
             elide: Text.ElideRight
           }
-        }
 
-        Text {
-          width: parent.width
-          text: String(root.suggestion.body || "")
-          color: Qt.darker(Color.notifications.text, 1.15)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-          maximumLineCount: 4
-          elide: Text.ElideRight
-        }
+          Text {
+            width: parent.width
+            text: "Context · " + String(root.suggestion.observation || "Active desktop context")
+            color: Qt.darker(Color.notifications.text, 1.4)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+          }
 
-        Text {
-          width: parent.width
-          text: String((root.suggestion.context || {}).appId || "Desktop")
-            + " · " + Math.round(Number(root.suggestion.confidence || 0) * 100) + "%"
-          color: Qt.darker(Color.notifications.text, 1.45)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
+          Text {
+            visible: String(root.suggestion.body || "") !== ""
+            width: parent.width
+            text: String(root.suggestion.body || "")
+              + ((root.suggestion || {}).streaming === true ? "  ▌" : "")
+            color: Qt.darker(Color.notifications.text, 1.15)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            maximumLineCount: root.suggestionInteracting ? 1000 : 9
+            elide: root.suggestionInteracting ? Text.ElideNone : Text.ElideRight
+          }
 
-        Grid {
+          Item {
+            visible: String(root.suggestion.copyText || root.suggestion.body || "") !== ""
+              && root.suggestionInteracting
+            width: parent.width
+            height: visible ? copySuggestionButton.implicitHeight : 0
+
+            Button {
+              id: copySuggestionButton
+              anchors.right: parent.right
+              iconText: "󰆏"
+              tooltipText: "Copy response"
+              foreground: Qt.darker(Color.notifications.text, 1.2)
+              accent: root.accent
+              fontFamily: root.fontFamily
+              iconSize: Style.font.bodySmall
+              horizontalPadding: Style.space(6)
+              verticalPadding: Style.space(4)
+              focusable: true
+              onClicked: root.runAssistantAction("copy")
+            }
+          }
+
+          TextField {
+            id: summonField
+            visible: root.summonAwaitingInput
+            width: parent.width
+            text: root.summonPrompt
+            placeholderText: "What do you need?"
+            foreground: Color.notifications.text
+            accent: root.accent
+            font.family: root.fontFamily
+            maximumLength: 2000
+            onTextChanged: root.summonPrompt = text
+            Keys.onReturnPressed: root.submitSummon()
+            Keys.onEscapePressed: root.dismissSuggestion()
+          }
+
+        }
+      }
+
+      Column {
+        id: actionFooter
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Style.space(12)
+        anchors.rightMargin: Style.space(12)
+        anchors.bottomMargin: Style.space(12)
+        height: implicitHeight
+
+        Row {
+          id: summonActions
+          visible: root.summonAwaitingInput
           width: parent.width
-          columns: 2
           spacing: Style.space(8)
           readonly property real cellWidth: (width - spacing) / 2
 
           Button {
             width: parent.cellWidth
-            text: "Dismiss"
+            text: root.dismissButtonLabel()
             bordered: true
             foreground: Color.notifications.text
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             verticalPadding: Style.spacing.controlPaddingY
-            onClicked: root.runCopilotAction("dismiss")
+            onClicked: root.dismissSuggestion()
           }
 
           Button {
             width: parent.cellWidth
-            text: "Copy draft"
+            text: root.assistantBusy && root.assistantPendingAction === "ask" ? "Thinking…" : "Ask"
             bordered: true
-            foreground: Color.notifications.text
+            foreground: root.accent
+            accent: root.accent
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             verticalPadding: Style.spacing.controlPaddingY
-            onClicked: root.runCopilotAction("copy")
-          }
-
-          Button {
-            width: parent.cellWidth
-            text: "Remember"
-            bordered: true
-            foreground: Color.notifications.text
-            fontFamily: root.fontFamily
-            fontSize: Style.font.bodySmall
-            verticalPadding: Style.spacing.controlPaddingY
-            onClicked: root.runCopilotAction("remember")
-          }
-
-          Button {
-            width: parent.cellWidth
-            visible: root.copilotStatus.delegateAvailable && String(root.suggestion.delegatePrompt || "") !== ""
-            text: root.continueButtonLabel()
-            bordered: true
-            foreground: Color.notifications.text
-            fontFamily: root.fontFamily
-            fontSize: Style.font.bodySmall
-            verticalPadding: Style.spacing.controlPaddingY
-            onClicked: root.harnessMenuOpen = !root.harnessMenuOpen
+            enabled: root.summonPrompt.trim() !== "" && !root.assistantBusy
+            onClicked: root.submitSummon()
           }
         }
 
-        Column {
+        Row {
+          id: resultActions
+          visible: !root.summonAwaitingInput
           width: parent.width
-          visible: root.harnessMenuOpen && root.copilotStatus.delegateAvailable
-          spacing: Style.space(6)
+          spacing: Style.space(8)
+          readonly property bool continueAvailable: root.assistantStatus.delegateAvailable
+            && String(root.suggestion.body || root.suggestion.delegatePrompt || "") !== ""
+          readonly property real cellWidth: continueAvailable ? (width - spacing) / 2 : width
 
-          Text {
-            width: parent.width
-            text: "Continue in"
-            color: Qt.darker(Color.notifications.text, 1.35)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+          Button {
+            width: parent.cellWidth
+            text: root.dismissButtonLabel()
+            bordered: true
+            foreground: Color.notifications.text
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            verticalPadding: Style.spacing.controlPaddingY
+            onClicked: root.dismissSuggestion()
           }
 
-          Repeater {
-            model: root.copilotStatus.harnessChoices || []
-
-            Button {
-              required property var modelData
-              width: suggestionContent.width
-              text: String(modelData.label || modelData.value || "Harness")
-              selected: String(modelData.value || "") === String(root.copilotStatus.preferredHarness || "")
-              bordered: true
-              foreground: Color.notifications.text
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.runCopilotAction("delegate", String(modelData.value || ""))
-            }
+          Button {
+            width: resultActions.cellWidth
+            visible: resultActions.continueAvailable
+            text: root.assistantBusy && root.assistantPendingAction === "delegate"
+              ? "Preparing handoff…" : root.continueButtonLabel()
+            bordered: true
+            foreground: root.accent
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            verticalPadding: Style.spacing.controlPaddingY
+            enabled: !root.assistantBusy
+            onClicked: root.runAssistantAction("delegate")
           }
         }
       }
     }
   }
+
 }

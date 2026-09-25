@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"$LOCAL_AI_ASSISTANT_FAKE_APP_LOG"

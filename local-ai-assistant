@@ -1,0 +1,2830 @@
+#!/usr/bin/env python3
+"""Lifecycle, observer, Pi runner, and explicit actions for Local AI Assistant."""
+
+from __future__ import annotations
+
+import argparse
+import codecs
+import configparser
+import fcntl
+import hashlib
+import json
+import os
+import re
+import selectors
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+
+PLUGIN_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG = Path("~/.config/omarchy/local-ai.toml").expanduser()
+LEGACY_CONFIG = Path("~/.config/omarchy/local-ai-assistant.toml").expanduser()
+XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
+STATE_DIR = Path(
+    os.environ.get(
+        "LOCAL_AI_ASSISTANT_STATE_DIR",
+        str(Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser() / "omarchy/local-ai-assistant"),
+    )
+).expanduser()
+PI_DIR = Path(
+    os.environ.get(
+        "LOCAL_AI_ASSISTANT_PI_DIR",
+        str(Path("~/.local/share/local-ai-assistant/pi-agent").expanduser()),
+    )
+).expanduser()
+UNIT_DIR = Path(
+    os.environ.get(
+        "LOCAL_AI_ASSISTANT_UNIT_DIR",
+        str(Path("~/.config/systemd/user").expanduser()),
+    )
+).expanduser()
+UNIT_NAME = "omarchy-local-ai-assistant.service"
+STATUS_FILE = STATE_DIR / "status.json"
+SUGGESTION_FILE = STATE_DIR / "suggestion.json"
+CONTROL_FILE = STATE_DIR / "control.json"
+AUDIT_FILE = STATE_DIR / "audit.jsonl"
+FEEDBACK_FILE = STATE_DIR / "dismissed-suggestions.json"
+MEMORY_FILE = STATE_DIR / "memory.md"
+VOICE_CONTROL_FILE = STATE_DIR / "voice-control.json"
+VOICE_LOCK_FILE = STATE_DIR / "voice-control.lock"
+HANDOFFS_DIR = Path(
+    os.environ.get(
+        "LOCAL_AI_ASSISTANT_HANDOFFS_DIR",
+        str(STATE_DIR.parent.parent / "agent-handoffs/local-ai"),
+    )
+).expanduser()
+SYSTEM_PROMPT_FILE = PLUGIN_DIR / "prompts/assistant-system.md"
+EXAMPLE_CONFIG_FILE = PLUGIN_DIR / "local-ai.example.toml"
+PROTECTED_DENY_APPS = ("1password", "bitwarden", "keepassxc", "org.gnome.seahorse")
+PROTECTED_DENY_TITLE_PATTERNS = (
+    "password", "passcode", "secret", "private key", "banking", "incognito", "private browsing"
+)
+HARNESS_SPECS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("codex", "Codex", "Codex app · portable handoff session", ("codex",)),
+    ("claude", "Claude Code", "Claude Code · portable handoff session", ("claude",)),
+    ("gemini", "Gemini CLI", "Gemini CLI · portable handoff session", ("gemini",)),
+    ("pi-worker", "Pi Worker", "Bounded worker · portable handoff session", ("pi-worker",)),
+    ("pi", "Pi", "Pi · portable handoff session", ("pi", "--")),
+)
+HARNESS_IDS = {item[0] for item in HARNESS_SPECS}
+FREQUENCY_PRESETS: dict[float, dict[str, int | float | str]] = {
+    0.82: {
+        "name": "quiet",
+        "debounce_sec": 8,
+        "cooldown_sec": 300,
+        "poll_interval_sec": 30,
+        "max_suggestions_per_hour": 4,
+    },
+    0.72: {
+        "name": "balanced",
+        "debounce_sec": 5,
+        "cooldown_sec": 180,
+        "poll_interval_sec": 15,
+        "max_suggestions_per_hour": 8,
+    },
+    0.62: {
+        "name": "proactive",
+        "debounce_sec": 2,
+        "cooldown_sec": 120,
+        "poll_interval_sec": 8,
+        "max_suggestions_per_hour": 8,
+    },
+}
+
+GENERIC_CONTEXT_TOKENS = {
+    "app", "browser", "chromium", "desktop", "firefox", "google", "home", "local", "new", "page",
+    "start", "tab", "window", "zen",
+}
+PASSIVE_CONTEXT_TOKENS = {
+    "disney", "netflix", "prime video", "spotify", "twitch", "youtube",
+}
+GENERIC_SUGGESTION_PATTERNS = (
+    "did you know",
+    "consider using",
+    "try using",
+    "you can use",
+    "playback speed",
+    "search within",
+)
+ACTION_WORD_PATTERN = re.compile(
+    r"\b(?:add|answer|compare|continue|copy|create|draft|extract|fix|implement|open|plan|prepare|"
+    r"review|save|send|summarize|update|write|besvar|fortsæt|kopi[eé]r|lav|opret|"
+    r"opsummer|ret|skriv|sammenlign|åbn)\b",
+    re.IGNORECASE,
+)
+FEEDBACK_RETENTION_SEC = 30 * 24 * 60 * 60
+FEEDBACK_MAX_EXAMPLES = 24
+
+DEFAULTS: dict[str, dict[str, Any]] = {
+    "runtime": {
+        "endpoint": "http://127.0.0.1:8080/v1",
+        "model": "auto",
+        "context_window": 65536,
+        "max_output_tokens": 512,
+        "api_key_env": "",
+        "allow_remote_endpoint": False,
+        "startup_timeout_sec": 60,
+        "start_command": [],
+    },
+    "observer": {
+        "debounce_sec": 5,
+        "cooldown_sec": 180,
+        "poll_interval_sec": 15,
+        "inference_timeout_sec": 30,
+        "minimum_confidence": 0.72,
+        "suggestion_ttl_sec": 30,
+        "max_suggestions_per_hour": 8,
+    },
+    "privacy": {
+        "share_window_title": True,
+        "blocked_apps": [],
+        "deny_apps": ["1password", "bitwarden", "keepassxc", "org.gnome.seahorse"],
+        "deny_title_patterns": [
+            "password",
+            "passcode",
+            "secret",
+            "private key",
+            "banking",
+            "incognito",
+            "private browsing",
+        ],
+    },
+    "delegation": {
+        "preferred_harness": "auto",
+        "command": [],
+        "launch_in_terminal": True,
+    },
+    "playbook": {
+        "path": "~/.config/omarchy/local-ai-assistant-playbook.json",
+    },
+}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def command_argv(env_name: str, fallback: str) -> list[str]:
+    raw = os.environ.get(env_name, fallback)
+    argv = shlex.split(raw)
+    if not argv:
+        raise RuntimeError(f"{env_name} resolved to an empty command")
+    return argv
+
+
+def process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def hyprland_runtime_context() -> tuple[Path, str] | None:
+    """Find the active Hyprland IPC directory, including from a user service."""
+    runtime_dir = Path(
+        os.environ.get("LOCAL_AI_ASSISTANT_RUNTIME_DIR")
+        or os.environ.get("XDG_RUNTIME_DIR")
+        or f"/run/user/{os.getuid()}"
+    )
+    hypr_root = runtime_dir / "hypr"
+    requested = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "").strip()
+
+    def candidate(path: Path) -> tuple[bool, float] | None:
+        if not path.is_dir() or not (path / ".socket.sock").exists():
+            return None
+        live = False
+        try:
+            first_line = (path / "hyprland.lock").read_text(encoding="utf-8").splitlines()[0]
+            live = process_is_alive(int(first_line))
+        except (OSError, ValueError, IndexError):
+            pass
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            modified = 0.0
+        return live, modified
+
+    if requested:
+        requested_path = hypr_root / requested
+        if candidate(requested_path) is not None:
+            return runtime_dir, requested
+
+    try:
+        paths = list(hypr_root.iterdir())
+    except OSError:
+        return None
+    ranked: list[tuple[bool, float, Path]] = []
+    for path in paths:
+        details = candidate(path)
+        if details is not None:
+            ranked.append((details[0], details[1], path))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return runtime_dir, ranked[0][2].name
+
+
+def hyprland_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    context = hyprland_runtime_context()
+    if context is not None:
+        runtime_dir, signature = context
+        environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+        environment["HYPRLAND_INSTANCE_SIGNATURE"] = signature
+    return environment
+
+
+def systemctl(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [*command_argv("LOCAL_AI_ASSISTANT_SYSTEMCTL", "systemctl"), "--user", *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=check,
+    )
+
+
+def expand_path(value: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(value)))
+
+
+def load_config(path: Path, *, require: bool = True) -> dict[str, dict[str, Any]]:
+    if not path.is_file():
+        if require:
+            raise ConfigError(f"Config not found: {path}")
+        return {name: values.copy() for name, values in DEFAULTS.items()}
+
+    with path.open("rb") as handle:
+        root = tomllib.load(handle)
+    combined_fields = {"default", "profiles", "assistant"}
+    assistant_fields = set(DEFAULTS)
+    if "assistant" in root:
+        unknown_root = sorted(set(root).difference(combined_fields))
+        if unknown_root:
+            raise ConfigError("unknown top-level field(s): " + ", ".join(unknown_root))
+        raw = root["assistant"]
+        if not isinstance(raw, dict):
+            raise ConfigError("[assistant] must be a TOML table")
+    elif set(root).intersection(assistant_fields):
+        # Backward compatibility for the pre-0.10 standalone Assistant config.
+        raw = root
+    else:
+        unknown_root = sorted(set(root).difference({"default", "profiles"}))
+        if unknown_root:
+            raise ConfigError("unknown top-level field(s): " + ", ".join(unknown_root))
+        raw = {}
+        # Migrate existing machines lazily: read the old split file until the
+        # first Settings save embeds it in the shared Local AI config.
+        if path.resolve() == DEFAULT_CONFIG.resolve() and LEGACY_CONFIG.is_file():
+            with LEGACY_CONFIG.open("rb") as handle:
+                legacy = tomllib.load(handle)
+            if set(legacy).difference(assistant_fields):
+                raise ConfigError(f"legacy Assistant config is invalid: {LEGACY_CONFIG}")
+            raw = legacy
+    unknown_tables = sorted(set(raw).difference(DEFAULTS))
+    if unknown_tables:
+        raise ConfigError("unknown top-level table(s): " + ", ".join(unknown_tables))
+
+    config: dict[str, dict[str, Any]] = {}
+    for table, defaults in DEFAULTS.items():
+        supplied = raw.get(table, {})
+        if not isinstance(supplied, dict):
+            raise ConfigError(f"[{table}] must be a TOML table")
+        unknown = sorted(set(supplied).difference(defaults))
+        if unknown:
+            raise ConfigError(f"[{table}] has unknown field(s): " + ", ".join(unknown))
+        config[table] = {**defaults, **supplied}
+
+    runtime = config["runtime"]
+    observer = config["observer"]
+    privacy = config["privacy"]
+    delegation = config["delegation"]
+
+    for key in ("endpoint", "model", "api_key_env"):
+        if not isinstance(runtime[key], str):
+            raise ConfigError(f"runtime.{key} must be a string")
+    for key in ("context_window", "max_output_tokens", "startup_timeout_sec"):
+        if not isinstance(runtime[key], int) or isinstance(runtime[key], bool) or runtime[key] <= 0:
+            raise ConfigError(f"runtime.{key} must be a positive integer")
+    if not isinstance(runtime["allow_remote_endpoint"], bool):
+        raise ConfigError("runtime.allow_remote_endpoint must be a boolean")
+    validate_argv(runtime["start_command"], "runtime.start_command")
+    if runtime["api_key_env"] and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", runtime["api_key_env"]):
+        raise ConfigError("runtime.api_key_env must be an environment variable name")
+
+    endpoint = runtime["endpoint"].rstrip("/")
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ConfigError("runtime.endpoint must be an http(s) URL without embedded credentials")
+    if not runtime["allow_remote_endpoint"] and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ConfigError("runtime.endpoint must be loopback unless allow_remote_endpoint=true")
+    runtime["endpoint"] = endpoint
+
+    numeric_bounds: dict[str, tuple[float, float]] = {
+        "debounce_sec": (0.5, 60),
+        "cooldown_sec": (5, 86400),
+        "poll_interval_sec": (2, 300),
+        "inference_timeout_sec": (5, 300),
+        "minimum_confidence": (0, 1),
+        "suggestion_ttl_sec": (5, 600),
+        "max_suggestions_per_hour": (1, 120),
+    }
+    for key, (minimum, maximum) in numeric_bounds.items():
+        value = observer[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not minimum <= value <= maximum:
+            raise ConfigError(f"observer.{key} must be between {minimum:g} and {maximum:g}")
+
+    if not isinstance(privacy["share_window_title"], bool):
+        raise ConfigError("privacy.share_window_title must be a boolean")
+    validate_string_list(privacy["blocked_apps"], "privacy.blocked_apps")
+    validate_string_list(privacy["deny_apps"], "privacy.deny_apps")
+    validate_string_list(privacy["deny_title_patterns"], "privacy.deny_title_patterns")
+    if not isinstance(delegation["preferred_harness"], str) or delegation["preferred_harness"] not in {
+        "auto", "custom", *HARNESS_IDS
+    }:
+        raise ConfigError("delegation.preferred_harness must be auto, custom, or a supported harness id")
+    validate_argv(delegation["command"], "delegation.command")
+    if not isinstance(delegation["launch_in_terminal"], bool):
+        raise ConfigError("delegation.launch_in_terminal must be a boolean")
+    if not isinstance(config["playbook"]["path"], str) or not config["playbook"]["path"].strip():
+        raise ConfigError("playbook.path must be a non-empty path string")
+
+    return config
+
+
+def validate_string_list(value: Any, label: str) -> None:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ConfigError(f"{label} must be an array of non-empty strings")
+
+
+def validate_argv(value: Any, label: str) -> None:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item or "\x00" in item or "\n" in item for item in value
+    ):
+        raise ConfigError(f"{label} must be an argv array of non-empty strings")
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    ensure_private_dir(path.parent)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def atomic_write_text(path: Path, payload: str) -> None:
+    ensure_private_dir(path.parent)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(payload, encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    raise ConfigError(f"unsupported settings value: {type(value).__name__}")
+
+
+def render_assistant_config(config: dict[str, dict[str, Any]], *, prefix: str = "") -> list[str]:
+    lines: list[str] = []
+    for table in DEFAULTS:
+        lines.append(f"[{prefix}{table}]")
+        for key in DEFAULTS[table]:
+            lines.append(f"{key} = {toml_value(config[table][key])}")
+        lines.append("")
+    return lines
+
+
+def render_config(config: dict[str, dict[str, Any]], root: dict[str, Any] | None = None) -> str:
+    root = root or {}
+    combined = bool(set(root).intersection({"default", "profiles", "assistant"}))
+    if not combined:
+        lines = ["# Local AI Assistant settings (legacy standalone format).", ""]
+        lines.extend(render_assistant_config(config))
+        return "\n".join(lines)
+
+    lines = ["# Local AI runtime profiles and optional always-on Assistant.", ""]
+    if "default" in root:
+        lines.extend([f"default = {toml_value(root['default'])}", ""])
+    profiles = root.get("profiles", [])
+    if not isinstance(profiles, list):
+        raise ConfigError("profiles must be an array of tables")
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            raise ConfigError("every profile must be a TOML table")
+        lines.append("[[profiles]]")
+        for key in ("name", "service", "summary", "endpoint"):
+            if key in profile:
+                lines.append(f"{key} = {toml_value(profile[key])}")
+        lines.append("")
+    lines.extend(render_assistant_config(config, prefix="assistant."))
+    return "\n".join(lines)
+
+
+def save_config(path: Path, config: dict[str, dict[str, Any]]) -> None:
+    ensure_private_dir(path.parent)
+    root: dict[str, Any] = {}
+    if path.is_file():
+        with path.open("rb") as handle:
+            root = tomllib.load(handle)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(render_config(config, root), encoding="utf-8")
+    temporary.chmod(0o600)
+    load_config(temporary)
+    temporary.replace(path)
+
+
+def read_json(path: Path, fallback: Any) -> Any:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value
+    except (OSError, json.JSONDecodeError):
+        return fallback
+
+
+def write_status(state: str, **extra: Any) -> None:
+    previous = read_json(STATUS_FILE, {})
+    payload = {
+        "state": state,
+        "updatedAt": int(time.time()),
+        "model": previous.get("model", ""),
+        "endpoint": previous.get("endpoint", ""),
+        "lastError": "",
+        **extra,
+    }
+    atomic_write_json(STATUS_FILE, payload)
+
+
+def clear_suggestion() -> None:
+    atomic_write_json(SUGGESTION_FILE, {})
+
+
+def suggestion_is_current(suggestion_id: str) -> bool:
+    value = read_json(SUGGESTION_FILE, {})
+    return isinstance(value, dict) and str(value.get("id", "")) == suggestion_id
+
+
+def suggestion_is_held(suggestion: dict[str, Any] | None = None) -> bool:
+    value = suggestion if suggestion is not None else read_json(SUGGESTION_FILE, {})
+    return isinstance(value, dict) and bool(value.get("id")) and value.get("held") is True
+
+
+def suggestion_is_active(suggestion: dict[str, Any] | None = None) -> bool:
+    value = suggestion if suggestion is not None else read_json(SUGGESTION_FILE, {})
+    if not isinstance(value, dict) or not value.get("id"):
+        return False
+    return suggestion_is_held(value) or int(value.get("expiresAt", 0) or 0) > int(time.time())
+
+
+def set_suggestion_held(config: dict[str, dict[str, Any]], held: bool) -> None:
+    suggestion = read_json(SUGGESTION_FILE, {})
+    if not isinstance(suggestion, dict) or not suggestion.get("id"):
+        return
+    suggestion["held"] = held
+    if not held:
+        suggestion["expiresAt"] = int(time.time()) + int(config["observer"]["suggestion_ttl_sec"])
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+
+
+def prepare_suggestion_window() -> None:
+    """Install the runtime rule for the interactive suggestion surface."""
+    hyprctl = command_argv("LOCAL_AI_ASSISTANT_HYPRCTL", "hyprctl")
+    if shutil.which(hyprctl[0]) is None and not Path(hyprctl[0]).is_file():
+        raise RuntimeError("hyprctl is unavailable")
+    rules = ((
+        'hl.window_rule({ name = "local-ai-suggestion", '
+        'match = { initial_title = "^Local AI Suggestion$" }, '
+        'float = true, no_initial_focus = true, size = {340, 320}, '
+        'move = {"monitor_w-window_w-24", "monitor_h-window_h-24"}, '
+        'focus_on_activate = false })'
+    ),)
+    for rule in rules:
+        completed = subprocess.run(
+            [*hyprctl, "eval", rule],
+            env=hyprland_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(bounded_text(
+                completed.stderr or completed.stdout or "could not prepare assistant windows", 300
+            ))
+
+
+def hyprctl_json(hyprctl: list[str], query: str) -> Any:
+    completed = subprocess.run(
+        [*hyprctl, "-j", query],
+        env=hyprland_environment(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=2,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(bounded_text(completed.stderr or f"hyprctl {query} failed", 300))
+    try:
+        return json.loads(completed.stdout or "null")
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"hyprctl {query} returned invalid JSON") from error
+
+
+def place_suggestion_window(timeout: float = 2.5) -> None:
+    """Move the already-created Quickshell surface to the active monitor corner."""
+    hyprctl = command_argv("LOCAL_AI_ASSISTANT_HYPRCTL", "hyprctl")
+    if shutil.which(hyprctl[0]) is None and not Path(hyprctl[0]).is_file():
+        raise RuntimeError("hyprctl is unavailable")
+    deadline = time.monotonic() + timeout
+    client: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        clients = hyprctl_json(hyprctl, "clients")
+        if isinstance(clients, list):
+            client = next(
+                (
+                    value for value in clients
+                    if isinstance(value, dict) and value.get("title") == "Local AI Suggestion"
+                ),
+                None,
+            )
+        if client and client.get("mapped", True) is not False:
+            break
+        time.sleep(0.05)
+    if not client:
+        raise RuntimeError("Local AI suggestion window did not appear")
+
+    address = str(client.get("address", ""))
+    size = client.get("size") or []
+    if not re.fullmatch(r"0x[0-9A-Fa-f]+", address) or not (
+        isinstance(size, list) and len(size) >= 2
+    ):
+        raise RuntimeError("Local AI suggestion window geometry is unavailable")
+    monitors = hyprctl_json(hyprctl, "monitors")
+    monitor_id = client.get("monitor")
+    monitor = next(
+        (
+            value for value in monitors
+            if isinstance(value, dict) and value.get("id") == monitor_id
+        ),
+        None,
+    ) if isinstance(monitors, list) else None
+    if not monitor:
+        raise RuntimeError("Local AI suggestion monitor geometry is unavailable")
+
+    try:
+        scale = max(0.1, float(monitor.get("scale", 1)))
+        monitor_width = round(float(monitor["width"]) / scale)
+        monitor_height = round(float(monitor["height"]) / scale)
+        monitor_x = round(float(monitor.get("x", 0)))
+        monitor_y = round(float(monitor.get("y", 0)))
+        window_width = round(float(size[0]))
+        window_height = round(float(size[1]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Local AI suggestion geometry is invalid") from error
+    margin = 24
+    x = max(monitor_x, monitor_x + monitor_width - window_width - margin)
+    y = max(monitor_y, monitor_y + monitor_height - window_height - margin)
+    selector = f"address:{address}"
+    dispatcher = (
+        f'hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, '
+        f'window = "{selector}" }})'
+    )
+    completed = subprocess.run(
+        [*hyprctl, "dispatch", dispatcher],
+        env=hyprland_environment(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=2,
+    )
+    if completed.returncode != 0:
+        legacy = subprocess.run(
+            [*hyprctl, "dispatch", "movewindowpixel", f"exact {x} {y},{selector}"],
+            env=hyprland_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=2,
+        )
+        if legacy.returncode != 0:
+            raise RuntimeError(bounded_text(
+                completed.stderr or legacy.stderr or "could not place assistant window", 300
+            ))
+
+
+def append_audit(action: str, suggestion: dict[str, Any] | None = None, **extra: Any) -> None:
+    context = (suggestion or {}).get("context") or {}
+    ensure_private_dir(AUDIT_FILE.parent)
+    payload = {
+        "timestamp": int(time.time()),
+        "action": action,
+        "suggestionId": str((suggestion or {}).get("id", "")),
+        "appId": str(context.get("appId", ""))[:120],
+        **extra,
+    }
+    with AUDIT_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    AUDIT_FILE.chmod(0o600)
+    if AUDIT_FILE.stat().st_size > 1024 * 1024:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-500:]
+        AUDIT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        AUDIT_FILE.chmod(0o600)
+
+
+def request_json(config: dict[str, dict[str, Any]], suffix: str, timeout: float = 8) -> Any:
+    runtime = config["runtime"]
+    url = runtime["endpoint"] + suffix
+    headers = {"Accept": "application/json"}
+    key_name = runtime["api_key_env"]
+    if key_name and os.environ.get(key_name):
+        headers["Authorization"] = f"Bearer {os.environ[key_name]}"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def model_rows(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("data", payload.get("models", []))
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def first_value(row: dict[str, Any], paths: list[tuple[str, ...]]) -> Any:
+    for path in paths:
+        value: Any = row
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                value = None
+                break
+            value = value[key]
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def model_parameter_billions(model_id: str) -> float:
+    match = re.search(r"(?:^|[-_:])(\d+(?:\.\d+)?)b(?:[-_:]|$)", model_id, re.IGNORECASE)
+    return float(match.group(1)) if match else 9999.0
+
+
+def friendly_model_name(model_id: str) -> str:
+    label = model_id.replace(":", " ").replace("-local", "").replace("-", " ")
+    label = re.sub(r"\bqwen(?=\d)", "Qwen ", label, flags=re.IGNORECASE)
+    label = re.sub(r"\bqwen\b", "Qwen", label, flags=re.IGNORECASE)
+    label = re.sub(r"\binstruct\b", "Instruct", label, flags=re.IGNORECASE)
+    label = re.sub(r"(\d+(?:\.\d+)?)b\b", r"\1B", label, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", label).strip()
+
+
+def desktop_entry_paths() -> list[Path]:
+    roots = [XDG_DATA_HOME / "applications"]
+    roots.extend(
+        Path(value) / "applications"
+        for value in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+        if value
+    )
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.desktop")):
+            identity = path.name.casefold()
+            if identity not in seen:
+                seen.add(identity)
+                paths.append(path)
+    return paths
+
+
+def executable_from_desktop(exec_line: str) -> str:
+    try:
+        parts = shlex.split(exec_line)
+    except ValueError:
+        parts = exec_line.split()
+    for part in parts:
+        if part == "env" or re.fullmatch(r"%[A-Za-z]", part) or ("=" in part and not part.startswith("/")):
+            continue
+        return Path(part).name
+    return ""
+
+
+def installed_app_options() -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for path in desktop_entry_paths():
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        try:
+            parser.read(path, encoding="utf-8")
+            entry = parser["Desktop Entry"]
+        except (OSError, KeyError, configparser.Error):
+            continue
+        if entry.get("Type", "Application") != "Application":
+            continue
+        if entry.get("Hidden", "false").lower() == "true" or entry.get("NoDisplay", "false").lower() == "true":
+            continue
+        label = entry.get("Name", "").strip()
+        startup_class = entry.get("StartupWMClass", "").strip()
+        executable = executable_from_desktop(entry.get("Exec", ""))
+        if executable in {"env", "sh", "bash", "gtk-launch", "omarchy-launch-webapp"}:
+            executable = ""
+        selectors = list(dict.fromkeys(value for value in (startup_class, path.stem, executable) if value))
+        selector = "|".join(selectors)
+        identity = selector.casefold()
+        if any(protected in identity for protected in PROTECTED_DENY_APPS):
+            continue
+        if not label or not selector or identity in seen:
+            continue
+        seen.add(identity)
+        options.append({
+            "value": selector,
+            "label": label,
+            "description": "Matches: " + ", ".join(selectors),
+        })
+    return sorted(options, key=lambda option: (option["label"].casefold(), option["value"].casefold()))
+
+
+def executable_available(executable: str) -> bool:
+    return shutil.which(executable) is not None or (Path(executable).is_file() and os.access(executable, os.X_OK))
+
+
+def harness_options(config: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    for harness_id, label, description, command in HARNESS_SPECS:
+        if executable_available(command[0]):
+            options.append({"value": harness_id, "label": label, "description": description})
+
+    configured = config["delegation"]["command"]
+    configured_name = Path(configured[0]).name if configured else ""
+    if configured and configured_name not in HARNESS_IDS and executable_available(configured[0]):
+        options.append({
+            "value": "custom",
+            "label": "Custom command",
+            "description": configured_name,
+        })
+    return options
+
+
+def harness_label(config: dict[str, dict[str, Any]], harness_id: str) -> str:
+    return next(
+        (option["label"] for option in harness_options(config) if option["value"] == harness_id),
+        "Unavailable harness",
+    )
+
+
+def resolved_preferred_harness(config: dict[str, dict[str, Any]]) -> str:
+    available = [str(option["value"]) for option in harness_options(config)]
+    preferred = str(config["delegation"]["preferred_harness"])
+    if preferred == "auto":
+        return available[0] if available else ""
+    return preferred if preferred in available else ""
+
+
+def suggestion_working_directory() -> str:
+    override = os.environ.get("LOCAL_AI_ASSISTANT_WORKING_DIRECTORY", "").strip()
+    if override:
+        candidate = expand_path(override)
+        return str(candidate.resolve()) if candidate.is_dir() else str(Path.home())
+    executable = shutil.which("omarchy-cmd-terminal-cwd")
+    if executable:
+        try:
+            completed = subprocess.run(
+                [executable],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            candidate = Path((completed.stdout or "").strip()).expanduser()
+            if completed.returncode == 0 and candidate.is_dir():
+                return str(candidate.resolve())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return str(Path.home())
+
+
+def add_worker_options(command: list[str], options: list[str]) -> list[str]:
+    insertion = command.index("--") if "--" in command else len(command)
+    return [*command[:insertion], *options, *command[insertion:]]
+
+
+def harness_argv(
+    config: dict[str, dict[str, Any]],
+    harness_id: str,
+    prompt: str,
+    suggestion: dict[str, Any] | None = None,
+) -> list[str]:
+    if harness_id == "auto":
+        raise RuntimeError("choose an installed harness")
+    available = {option["value"] for option in harness_options(config)}
+    if harness_id not in available:
+        raise RuntimeError(f"harness is not installed: {harness_id}")
+
+    configured = config["delegation"]["command"]
+    configured_name = Path(configured[0]).name if configured else ""
+    if harness_id == "custom":
+        command = configured
+    elif configured and configured_name == harness_id:
+        command = configured
+    else:
+        command = list(next(spec[3] for spec in HARNESS_SPECS if spec[0] == harness_id))
+        if harness_id == "pi-worker":
+            command = [
+                "pi-worker", "--profile", "inspect", "--thinking", "low", "--no-web", "--text", "--"
+            ]
+    if harness_id == "pi-worker":
+        suggestion = suggestion or {}
+        present = set(command)
+        options: list[str] = []
+        if "--cwd" not in present and not any(value.startswith("--cwd=") for value in command):
+            raw_cwd = str(suggestion.get("workingDirectory") or Path.home())
+            cwd = expand_path(raw_cwd)
+            options.extend(["--cwd", str(cwd.resolve() if cwd.is_dir() else Path.home())])
+        if "--job-id" not in present and not any(value.startswith("--job-id=") for value in command):
+            suffix = re.sub(r"[^A-Za-z0-9_-]+", "-", str(suggestion.get("id") or uuid.uuid4()))[:36]
+            options.extend(["--job-id", "local-ai-" + suffix])
+        if not present.intersection({"--json", "--result-json", "--rpc", "--text"}):
+            options.append("--text")
+        command = add_worker_options(command, options)
+    return [*command, prompt]
+
+
+def handoff_markdown(payload: dict[str, Any]) -> str:
+    source = payload["source"]
+    assistant = payload["assistant"]
+    observed = payload["observedContext"]
+    request = str(payload.get("request") or "").strip()
+    next_step = str(payload.get("suggestedNextStep") or "").strip()
+    return "\n".join([
+        "# Local AI handoff session",
+        "",
+        f"- Session: `{payload['id']}`",
+        f"- Created: `{payload['createdAtIso']}`",
+        f"- Working directory: `{payload['workingDirectory']}`",
+        f"- Source mode: `{source['mode']}`",
+        f"- Intended harness: `{payload['intendedHarness']}`",
+        "",
+        "This is a portable context handoff, not an internal session from Pi, Codex, or another harness.",
+        "",
+        "## User request",
+        "",
+        request or "No direct request was made; this session originated from a proactive suggestion.",
+        "",
+        "## Observed context",
+        "",
+        str(observed.get("summary") or "No active-window context was retained."),
+        "",
+        "## Local AI response",
+        "",
+        str(assistant.get("response") or "No response was retained."),
+        "",
+        "## Suggested next step",
+        "",
+        next_step or "Continue from the context above.",
+        "",
+        "Machine-readable metadata is available in `session.json` beside this file.",
+        "",
+    ])
+
+
+def create_handoff_session(suggestion: dict[str, Any], harness_id: str) -> Path:
+    ensure_private_dir(HANDOFFS_DIR)
+    session_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
+    session_dir = HANDOFFS_DIR / session_id
+    session_dir.mkdir(mode=0o700)
+    working_directory = expand_path(str(suggestion.get("workingDirectory") or Path.home()))
+    if not working_directory.is_dir():
+        working_directory = Path.home()
+    context = suggestion.get("context") if isinstance(suggestion.get("context"), dict) else {}
+    created_at = int(time.time())
+    payload: dict[str, Any] = {
+        "schemaVersion": 1,
+        "kind": "local-ai-handoff",
+        "id": session_id,
+        "createdAt": created_at,
+        "createdAtIso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_at)),
+        "workingDirectory": str(working_directory.resolve()),
+        "intendedHarness": harness_id,
+        "source": {
+            "application": "Local AI",
+            "component": "always-on-assistant",
+            "mode": bounded_text(suggestion.get("mode"), 40) or "proactive",
+            "suggestionId": bounded_text(suggestion.get("id"), 80),
+        },
+        "request": str(suggestion.get("request") or "")[:2000],
+        "observedContext": {
+            "summary": bounded_text(suggestion.get("observation"), 400),
+            "appId": bounded_text(context.get("appId"), 120),
+            "title": bounded_text(context.get("title"), 300),
+            "workspace": bounded_text(context.get("workspace"), 80),
+        },
+        "assistant": {
+            "title": bounded_text(suggestion.get("title"), 120),
+            "response": str(suggestion.get("body") or "")[:6000],
+        },
+        "suggestedNextStep": str(suggestion.get("delegatePrompt") or "")[:2000],
+    }
+    markdown_path = session_dir / "SESSION.md"
+    atomic_write_json(session_dir / "session.json", payload)
+    atomic_write_text(markdown_path, handoff_markdown(payload))
+    return markdown_path.resolve()
+
+
+def copy_handoff_path(path: Path) -> None:
+    completed = subprocess.run(
+        [*command_argv("LOCAL_AI_ASSISTANT_CLIPBOARD", "wl-copy")],
+        input=str(path),
+        text=True,
+        stdout=subprocess.DEVNULL,
+        # wl-copy may daemonize and keep inherited pipes open. Using DEVNULL
+        # prevents the Continue action from waiting on the clipboard owner.
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("could not copy the handoff path")
+
+
+def codex_desktop_command() -> list[str] | None:
+    override = os.environ.get("LOCAL_AI_ASSISTANT_CODEX_APP", "").strip()
+    if override:
+        command = shlex.split(override)
+        return command if command and executable_available(command[0]) else None
+    desktop_ids = {path.name.casefold() for path in desktop_entry_paths()}
+    if "chatgpt.desktop" in desktop_ids and shutil.which("gtk-launch"):
+        return ["gtk-launch", "chatgpt.desktop"]
+    if shutil.which("chatgpt"):
+        return ["chatgpt"]
+    return None
+
+
+def launch_handoff(
+    config: dict[str, dict[str, Any]],
+    harness_id: str,
+    handoff_path: Path,
+    suggestion: dict[str, Any],
+) -> None:
+    if harness_id == "codex":
+        desktop_command = codex_desktop_command()
+        if desktop_command:
+            subprocess.Popen(
+                desktop_command,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+    argv = harness_argv(config, harness_id, str(handoff_path), suggestion)
+    if config["delegation"]["launch_in_terminal"]:
+        argv = ["omarchy", "launch", "terminal", *argv]
+    subprocess.Popen(argv, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def endpoint_model_rows(endpoint: str, timeout: float = 0.8) -> list[dict[str, Any]]:
+    request = urllib.request.Request(endpoint.rstrip("/") + "/models", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return model_rows(json.load(response))
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+
+
+def setup_payload(config_path: Path) -> dict[str, Any]:
+    try:
+        config = load_config(config_path)
+        configured = True
+        config_error = ""
+    except ConfigError as error:
+        config = load_config(config_path, require=False)
+        configured = False
+        config_error = str(error)
+
+    current_endpoint = str(config["runtime"]["endpoint"])
+    current_model = str(config["runtime"]["model"])
+    endpoints = list(dict.fromkeys([
+        current_endpoint,
+        "http://127.0.0.1:11434/v1",
+        "http://127.0.0.1:8080/v1",
+    ]))
+    choices: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        provider = "Ollama" if urllib.parse.urlparse(endpoint).port == 11434 else "llama.cpp"
+        for row in endpoint_model_rows(endpoint):
+            model_id = str(first_value(row, [("id",), ("model",), ("name",)]) or "").strip()
+            if not model_id:
+                continue
+            value = endpoint.rstrip("/") + "|" + model_id
+            if value in seen:
+                continue
+            seen.add(value)
+            choices.append({
+                "value": value,
+                "endpoint": endpoint.rstrip("/"),
+                "model": model_id,
+                "label": friendly_model_name(model_id),
+                "description": provider,
+                "billions": model_parameter_billions(model_id),
+            })
+
+    selected_value = current_endpoint.rstrip("/") + "|" + current_model
+    if selected_value not in seen:
+        choices.append({
+            "value": selected_value,
+            "endpoint": current_endpoint,
+            "model": current_model,
+            "label": friendly_model_name(current_model),
+            "description": "Configured endpoint",
+            "billions": model_parameter_billions(current_model),
+        })
+    choices.sort(key=lambda item: (float(item["billions"]), str(item["label"]).lower()))
+    if current_model == "auto" and choices:
+        selected_value = str(choices[0]["value"])
+    if choices:
+        smallest = min(float(item["billions"]) for item in choices)
+        for item in choices:
+            if float(item["billions"]) == smallest and smallest < 9999:
+                item["description"] += " · Fastest available"
+                break
+
+    sync_memory_file()
+    available_harnesses = harness_options(config)
+    preferred_harness = resolved_preferred_harness(config)
+    return {
+        "configured": configured,
+        "configError": config_error,
+        "config": {
+            "modelChoice": selected_value,
+            "endpoint": current_endpoint,
+            "model": current_model,
+            "minimumConfidence": float(config["observer"]["minimum_confidence"]),
+            "shareWindowTitle": bool(config["privacy"]["share_window_title"]),
+            "blockedApps": list(config["privacy"]["blocked_apps"]),
+            "preferredHarness": preferred_harness,
+        },
+        "modelChoices": choices,
+        "harnessChoices": available_harnesses,
+        "dismissedSuggestionCount": len(feedback_entries()),
+        "memoryFile": str(MEMORY_FILE),
+    }
+
+
+def configure_from_ui(
+    config_path: Path,
+    model_choice: str,
+    confidence_text: str,
+    share_title_text: str,
+    blocked_apps_text: str = "[]",
+    preferred_harness: str = "",
+) -> None:
+    if "|" not in model_choice:
+        raise ConfigError("choose an available local model")
+    endpoint, model_id = model_choice.rsplit("|", 1)
+    endpoint = endpoint.rstrip("/")
+    model_id = model_id.strip()
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ConfigError("Assistant settings only accept a local loopback endpoint")
+    if not model_id or len(model_id) > 200 or any(character in model_id for character in "\n\r\x00"):
+        raise ConfigError("model id is invalid")
+    try:
+        confidence = float(confidence_text)
+    except ValueError as error:
+        raise ConfigError("suggestion sensitivity is invalid") from error
+    if confidence not in FREQUENCY_PRESETS:
+        raise ConfigError("suggestion sensitivity is invalid")
+    if share_title_text not in {"true", "false"}:
+        raise ConfigError("window-title setting is invalid")
+    try:
+        blocked_apps = json.loads(blocked_apps_text)
+    except json.JSONDecodeError as error:
+        raise ConfigError("blocked-apps setting is invalid") from error
+    validate_string_list(blocked_apps, "privacy.blocked_apps")
+    if len(blocked_apps) > 100:
+        raise ConfigError("privacy.blocked_apps cannot contain more than 100 apps")
+    blocked_apps = list(dict.fromkeys(item.strip()[:200] for item in blocked_apps))
+
+    config = load_config(config_path, require=False)
+    harness_values = {option["value"] for option in harness_options(config)}
+    if preferred_harness not in harness_values:
+        raise ConfigError("choose an installed preferred harness")
+    previous_endpoint = str(config["runtime"]["endpoint"]).rstrip("/")
+    config["runtime"]["endpoint"] = endpoint
+    config["runtime"]["model"] = model_id
+    if parsed.port == 11434:
+        config["runtime"]["context_window"] = 32768
+    if endpoint != previous_endpoint:
+        config["runtime"]["start_command"] = []
+    frequency = FREQUENCY_PRESETS[confidence]
+    config["observer"]["minimum_confidence"] = confidence
+    for key in ("debounce_sec", "cooldown_sec", "poll_interval_sec", "max_suggestions_per_hour"):
+        config["observer"][key] = frequency[key]
+    config["privacy"]["share_window_title"] = share_title_text == "true"
+    config["privacy"]["blocked_apps"] = blocked_apps
+    config["delegation"]["preferred_harness"] = preferred_harness
+    save_config(config_path, config)
+    if service_flag("is-active"):
+        result = systemctl("restart", UNIT_NAME)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "could not reload Assistant settings")
+
+
+def discover_runtime(config: dict[str, dict[str, Any]]) -> tuple[str, int]:
+    runtime = config["runtime"]
+    payload = request_json(config, "/models")
+    rows = model_rows(payload)
+    configured = runtime["model"]
+    selected: dict[str, Any] | None = None
+    if configured != "auto":
+        selected = next(
+            (row for row in rows if str(first_value(row, [("id",), ("model",), ("name",)]) or "") == configured),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError(f"runtime model is not served: {configured}")
+    elif rows:
+        selected = rows[0]
+    if selected is None:
+        raise RuntimeError("runtime /models returned no model")
+
+    model_id = str(first_value(selected, [("id",), ("model",), ("name",)]) or "").strip()
+    if not model_id:
+        raise RuntimeError("runtime model has no id")
+    context_raw = first_value(
+        selected,
+        [
+            ("context_window",),
+            ("contextWindow",),
+            ("context_length",),
+            ("context_size",),
+            ("max_model_len",),
+            ("metadata", "context_length"),
+            ("metadata", "limits", "max_context_length"),
+            ("meta", "n_ctx"),
+            ("meta", "n_ctx_train"),
+        ],
+    )
+    try:
+        context_window = int(context_raw)
+    except (TypeError, ValueError):
+        context_window = int(runtime["context_window"])
+    if context_window <= 0:
+        raise RuntimeError("runtime context window is invalid")
+    return model_id, context_window
+
+
+def option_value(argv: list[str], flag: str) -> str:
+    for index, value in enumerate(argv):
+        if value == flag and index + 1 < len(argv):
+            return argv[index + 1]
+        if value.startswith(flag + "="):
+            return value.split("=", 1)[1]
+    return ""
+
+
+def runtime_api_key(config: dict[str, dict[str, Any]], model_id: str) -> str:
+    """Resolve loopback llama.cpp auth without putting secrets in TOML or UI."""
+    runtime = config["runtime"]
+    key_name = runtime["api_key_env"]
+    if key_name and os.environ.get(key_name):
+        return os.environ[key_name]
+
+    parsed = urllib.parse.urlparse(runtime["endpoint"])
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return ""
+    wanted_port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
+    proc = Path("/proc")
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return ""
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        argv = [part.decode(errors="replace") for part in raw.split(b"\x00") if part]
+        if not argv or Path(argv[0]).name != "llama-server":
+            continue
+        alias = option_value(argv, "--alias")
+        port = option_value(argv, "--port") or "8080"
+        key = option_value(argv, "--api-key")
+        if key and port == wanted_port and (not alias or alias == model_id):
+            return key
+    return ""
+
+
+def sync_pi_catalog(config: dict[str, dict[str, Any]]) -> tuple[str, int]:
+    model_id, context_window = discover_runtime(config)
+    runtime = config["runtime"]
+    max_tokens = min(int(runtime["max_output_tokens"]), max(128, context_window - 1))
+    discovered_key = runtime_api_key(config, model_id)
+    api_key = discovered_key or "local-loopback"
+    catalog = {
+        "providers": {
+            "assistant-local": {
+                "baseUrl": runtime["endpoint"],
+                "api": "openai-completions",
+                "apiKey": api_key,
+                "authHeader": bool(discovered_key),
+                "compat": {
+                    "supportsUsageInStreaming": False,
+                    "maxTokensField": "max_tokens",
+                    "supportsDeveloperRole": False,
+                },
+                "models": [
+                    {
+                        "id": model_id,
+                        "name": f"{model_id} (Local AI Assistant)",
+                        "input": ["text"],
+                        "reasoning": False,
+                        "contextWindow": context_window,
+                        "maxTokens": max_tokens,
+                        "samplingParams": {"temperature": 0.2},
+                    }
+                ],
+            }
+        }
+    }
+    atomic_write_json(PI_DIR / "models.json", catalog)
+    return model_id, context_window
+
+
+def ensure_runtime(config: dict[str, dict[str, Any]]) -> tuple[str, int]:
+    try:
+        return sync_pi_catalog(config)
+    except Exception as first_error:
+        start_command = [os.path.expandvars(os.path.expanduser(arg)) for arg in config["runtime"]["start_command"]]
+        if not start_command:
+            raise RuntimeError(f"local runtime is unavailable: {first_error}") from first_error
+        subprocess.run(start_command, check=True, timeout=30)
+        deadline = time.monotonic() + int(config["runtime"]["startup_timeout_sec"])
+        last_error: Exception = first_error
+        while time.monotonic() < deadline:
+            try:
+                return sync_pi_catalog(config)
+            except Exception as error:
+                last_error = error
+                time.sleep(1)
+        raise RuntimeError(f"local runtime did not become ready: {last_error}") from last_error
+
+
+def load_playbook(config: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    path = expand_path(config["playbook"]["path"])
+    value = read_json(path, {"version": 1, "rules": []})
+    if not isinstance(value, dict) or not isinstance(value.get("rules"), list):
+        return {"version": 1, "rules": []}
+    return value
+
+
+def matching_playbook_hints(config: dict[str, dict[str, Any]], context: dict[str, str]) -> list[str]:
+    app_id = context.get("appId", "").lower()
+    title = context.get("title", "").lower()
+    hints: list[str] = []
+    for rule in load_playbook(config).get("rules", []):
+        if not isinstance(rule, dict) or rule.get("enabled", True) is False:
+            continue
+        rule_app = str(rule.get("appId", "")).lower()
+        title_keyword = str(rule.get("titleKeyword", "")).lower()
+        if rule_app and rule_app != app_id:
+            continue
+        if title_keyword and title_keyword not in title:
+            continue
+        hint = str(rule.get("hint", "")).strip()
+        if hint:
+            hints.append(hint[:300])
+    return hints[:5]
+
+
+def active_context(config: dict[str, dict[str, Any]]) -> dict[str, str] | None:
+    completed = subprocess.run(
+        [*command_argv("LOCAL_AI_ASSISTANT_HYPRCTL", "hyprctl"), "-j", "activewindow"],
+        env=hyprland_environment(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or "hyprctl activewindow failed")
+    raw = json.loads(completed.stdout or "{}")
+    if not isinstance(raw, dict):
+        return None
+    app_id = str(raw.get("class") or raw.get("initialClass") or "").strip()[:120]
+    title = str(raw.get("title") or "").strip()[:200]
+    workspace = raw.get("workspace") or {}
+    workspace_name = str(workspace.get("name") or workspace.get("id") or "")[:80] if isinstance(workspace, dict) else ""
+    if not app_id and not title:
+        return None
+
+    lowered_app = app_id.lower()
+    lowered_title = title.lower()
+    privacy = config["privacy"]
+    blocked_apps = [*PROTECTED_DENY_APPS, *privacy["deny_apps"], *privacy["blocked_apps"]]
+    if any(
+        token.casefold() in lowered_app
+        for rule in blocked_apps
+        for token in rule.split("|")
+        if token.strip()
+    ):
+        return None
+    title_patterns = [*PROTECTED_DENY_TITLE_PATTERNS, *privacy["deny_title_patterns"]]
+    if any(needle.lower() in lowered_title for needle in title_patterns):
+        return None
+    if not privacy["share_window_title"]:
+        title = ""
+    return {"appId": app_id, "title": title, "workspace": workspace_name}
+
+
+def context_fingerprint(context: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
+
+
+def audit_rows() -> list[dict[str, Any]]:
+    try:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines[-500:]:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def feedback_entries() -> list[dict[str, Any]]:
+    value = read_json(FEEDBACK_FILE, {"version": 1, "examples": []})
+    examples = value.get("examples", []) if isinstance(value, dict) else []
+    cutoff = int(time.time()) - FEEDBACK_RETENTION_SEC
+    return [
+        item for item in examples
+        if isinstance(item, dict) and int(item.get("dismissedAt", 0) or 0) >= cutoff
+    ][-FEEDBACK_MAX_EXAMPLES:]
+
+
+def memory_markdown(examples: list[dict[str, Any]] | None = None) -> str:
+    examples = feedback_entries() if examples is None else examples
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
+    lines = [
+        "# Local AI learned memory",
+        "",
+        "> Maintained automatically by Local AI. Dismissing a proactive suggestion adds or strengthens a learned preference here.",
+        "",
+        f"Updated: {generated_at}",
+        f"Active learned patterns: {len(examples)}",
+        "Retention: 30 days after the most recent matching dismissal.",
+        "",
+        "## Learned preferences",
+        "",
+    ]
+    if not examples:
+        lines.extend(["No learned dismissals yet.", ""])
+        return "\n".join(lines)
+
+    for item in examples:
+        title = bounded_text(item.get("title"), 72).replace("\n", " ") or "Untitled pattern"
+        body = bounded_text(item.get("body"), 240).replace("\n", " ")
+        dismissed_at = int(item.get("dismissedAt", 0) or 0)
+        scopes = [scope for scope in item.get("scopes", []) if isinstance(scope, dict)]
+        learning = "Global across contexts" if len(scopes) >= 2 else "App/context specific"
+        lines.extend([
+            f"- **Avoid suggesting: {title}** — {body}",
+            f"  - Dismissed: {int(item.get('count', 1) or 1)} time(s)",
+            f"  - Learning level: {learning}",
+            f"  - Last dismissed: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(dismissed_at))}",
+            f"  - Expires: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(dismissed_at + FEEDBACK_RETENTION_SEC))}",
+            "  - Contexts:",
+        ])
+        if not scopes:
+            lines.append("    - Unspecified context")
+        for scope in scopes:
+            app_id = bounded_text(scope.get("appId"), 120).replace("`", "'") or "unknown app"
+            tags = [bounded_text(tag, 80).replace("`", "'") for tag in scope.get("tags", []) if str(tag).strip()]
+            tag_text = ", ".join(f"`{tag}`" for tag in tags) if tags else "no page tags"
+            lines.append(f"    - `{app_id}` · {tag_text}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def sync_memory_file() -> Path:
+    atomic_write_text(MEMORY_FILE, memory_markdown())
+    return MEMORY_FILE
+
+
+def suggestion_tokens(value: dict[str, Any]) -> set[str]:
+    text = f"{value.get('title', '')} {value.get('body', '')}".casefold()
+    ignored = GENERIC_CONTEXT_TOKENS | {"and", "for", "from", "that", "the", "this", "with", "your"}
+    return {
+        word for word in re.findall(r"[\wæøå]+", text)
+        if len(word) >= 3 and word not in ignored
+    }
+
+
+def suggestion_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_tokens = suggestion_tokens(left)
+    right_tokens = suggestion_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+
+
+def feedback_scope(context: dict[str, Any]) -> dict[str, Any]:
+    app_id = bounded_text(context.get("appId"), 120).casefold()
+    app_tokens = set(re.findall(r"[\wæøå]+", app_id))
+    tags = [
+        word for word in re.findall(r"[\wæøå]+", bounded_text(context.get("title"), 200).casefold())
+        if len(word) >= 3 and word not in GENERIC_CONTEXT_TOKENS and word not in app_tokens and not word.isdigit()
+    ]
+    return {"appId": app_id, "tags": list(dict.fromkeys(tags))[:12]}
+
+
+def feedback_scope_matches(context: dict[str, Any], stored_scope: dict[str, Any]) -> bool:
+    current = feedback_scope(context)
+    current_tags = set(current["tags"])
+    stored_tags = set(stored_scope.get("tags", []))
+    if current_tags and stored_tags and current_tags & stored_tags:
+        return True
+    return bool(current["appId"] and current["appId"] == stored_scope.get("appId") and not stored_tags)
+
+
+def resembles_dismissed_suggestion(raw: dict[str, Any], context: dict[str, Any]) -> bool:
+    for item in feedback_entries():
+        if suggestion_similarity(raw, item) < 0.55:
+            continue
+        scopes = [scope for scope in item.get("scopes", []) if isinstance(scope, dict)]
+        if len(scopes) >= 2 or any(feedback_scope_matches(context, scope) for scope in scopes):
+            return True
+    return False
+
+
+def dismissed_suggestion_examples(context: dict[str, Any]) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for item in feedback_entries():
+        scopes = [scope for scope in item.get("scopes", []) if isinstance(scope, dict)]
+        if len(scopes) < 2 and not any(feedback_scope_matches(context, scope) for scope in scopes):
+            continue
+        examples.append({
+            "title": bounded_text(item.get("title"), 72),
+            "body": bounded_text(item.get("body"), 240),
+            "context_tags": feedback_scope(context)["tags"],
+        })
+    return examples[-6:]
+
+
+def remember_dismissed_suggestion(suggestion: dict[str, Any]) -> None:
+    if suggestion.get("mode") != "proactive":
+        return
+    example = {
+        "title": bounded_text(suggestion.get("title"), 72),
+        "body": bounded_text(suggestion.get("body"), 240),
+        "dismissedAt": int(time.time()),
+        "count": 1,
+        "scopes": [feedback_scope(suggestion.get("context") or {})],
+    }
+    if not example["title"] or not example["body"]:
+        return
+    examples = feedback_entries()
+    for existing in examples:
+        if suggestion_similarity(example, existing) >= 0.75:
+            existing["dismissedAt"] = example["dismissedAt"]
+            existing["count"] = int(existing.get("count", 1) or 1) + 1
+            scopes = [scope for scope in existing.get("scopes", []) if isinstance(scope, dict)]
+            if example["scopes"][0] not in scopes:
+                scopes.append(example["scopes"][0])
+            existing["scopes"] = scopes[-8:]
+            break
+    else:
+        examples.append(example)
+    atomic_write_json(FEEDBACK_FILE, {"version": 1, "examples": examples[-FEEDBACK_MAX_EXAMPLES:]})
+    sync_memory_file()
+
+
+def meaningful_context_tokens(context: dict[str, str]) -> list[str]:
+    app_tokens = set(re.findall(r"[\wæøå]+", context.get("appId", "").casefold()))
+    words = re.findall(r"[\wæøå]+", context.get("title", "").casefold())
+    ignored = GENERIC_CONTEXT_TOKENS | app_tokens
+    return [word for word in words if len(word) >= 3 and word not in ignored and not word.isdigit()]
+
+
+def context_is_actionable(config: dict[str, dict[str, Any]], context: dict[str, str]) -> bool:
+    if matching_playbook_hints(config, context):
+        return True
+    title = context.get("title", "").casefold().strip()
+    app_id = context.get("appId", "").casefold().strip()
+    if not title or title == "local ai suggestion" or "local-ai-suggestion" in app_id:
+        return False
+    if any(token in title or token in app_id for token in PASSIVE_CONTEXT_TOKENS):
+        return False
+    return len(meaningful_context_tokens(context)) >= 2
+
+
+def suggestion_is_actionable(raw: dict[str, Any], context: dict[str, Any]) -> bool:
+    text = bounded_text(f"{raw.get('title', '')} {raw.get('body', '')}", 400).casefold()
+    if any(pattern in text for pattern in GENERIC_SUGGESTION_PATTERNS):
+        return False
+    return ACTION_WORD_PATTERN.search(text) is not None and not resembles_dismissed_suggestion(raw, context)
+
+
+def parse_model_json(output: str) -> dict[str, Any]:
+    cleaned = output.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(cleaned):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(cleaned[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise RuntimeError("Pi did not return a JSON object")
+
+
+def bounded_text(value: Any, maximum: int) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:maximum]
+
+
+def observed_context_text(context: dict[str, str]) -> str:
+    """Describe only the metadata the observer actually received."""
+    app_id = bounded_text(context.get("appId"), 80)
+    title = bounded_text(context.get("title"), 120)
+    workspace = bounded_text(context.get("workspace"), 60)
+    if title and app_id:
+        observed = f"Window in {app_id}: {title}"
+    elif title:
+        observed = f"Window: {title}"
+    elif app_id:
+        observed = f"Active app: {app_id}"
+    else:
+        observed = "Active desktop context"
+    if workspace:
+        observed += f" · Workspace {workspace}"
+    return bounded_text(observed, 180)
+
+
+def normalized_suggestion(
+    raw: dict[str, Any],
+    context: dict[str, str],
+    config: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if raw.get("show") is not True:
+        return None
+    try:
+        confidence = float(raw.get("confidence", 0))
+    except (TypeError, ValueError):
+        return None
+    threshold = float(config["observer"]["minimum_confidence"])
+    if not 0 <= confidence <= 1 or confidence < threshold or not suggestion_is_actionable(raw, context):
+        return None
+    title = bounded_text(raw.get("title"), 72)
+    body = bounded_text(raw.get("body"), 240)
+    if not title or not body:
+        return None
+    now = int(time.time())
+    ttl = int(config["observer"]["suggestion_ttl_sec"])
+    return {
+        "id": str(uuid.uuid4()),
+        "mode": "proactive",
+        "title": title,
+        "observation": observed_context_text(context),
+        "body": body,
+        "copyText": bounded_text(raw.get("copy_text"), 600) or body,
+        "delegatePrompt": bounded_text(raw.get("delegate_prompt"), 1000),
+        "confidence": round(confidence, 3),
+        "createdAt": now,
+        "expiresAt": now + ttl,
+        "workingDirectory": suggestion_working_directory(),
+        "context": context,
+    }
+
+
+def suggestions_last_hour() -> int:
+    cutoff = int(time.time()) - 3600
+    count = 0
+    for row in audit_rows():
+        if row.get("action") == "shown" and int(row.get("timestamp", 0)) >= cutoff:
+            count += 1
+    return count
+
+
+def pi_invocation(
+    config: dict[str, dict[str, Any]],
+    system_prompt: str,
+    user_payload: dict[str, Any],
+) -> tuple[list[str], dict[str, str], str, int]:
+    model_id, context_window = ensure_runtime(config)
+    ensure_private_dir(PI_DIR)
+    ensure_private_dir(STATE_DIR)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PI_CODING_AGENT_DIR": str(PI_DIR),
+            "PI_TELEMETRY": "0",
+            "PI_OFFLINE": "1",
+        }
+    )
+    command = [
+        *command_argv("LOCAL_AI_ASSISTANT_PI", "pi"),
+        "--provider",
+        "assistant-local",
+        "--model",
+        model_id,
+        "--thinking",
+        "off",
+        "--mode",
+        "text",
+        "--print",
+        "--no-session",
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--offline",
+        "--system-prompt",
+        system_prompt,
+        "--",
+        json.dumps(user_payload, ensure_ascii=False, separators=(",", ":")),
+    ]
+    return command, environment, model_id, context_window
+
+
+def run_pi(config: dict[str, dict[str, Any]], context: dict[str, str]) -> dict[str, Any]:
+    confidence = float(config["observer"]["minimum_confidence"])
+    frequency = FREQUENCY_PRESETS.get(confidence, FREQUENCY_PRESETS[0.72])
+    command, environment, model_id, context_window = pi_invocation(
+        config,
+        SYSTEM_PROMPT_FILE.read_text(encoding="utf-8"),
+        {
+            "interaction_mode": "proactive",
+            "active_window": context,
+            "playbook_hints": matching_playbook_hints(config, context),
+            "suggestion_mode": str(frequency["name"]),
+            "dismissed_suggestion_examples": dismissed_suggestion_examples(context),
+        },
+    )
+    completed = subprocess.run(
+        command,
+        cwd=STATE_DIR,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=float(config["observer"]["inference_timeout_sec"]),
+    )
+    if completed.returncode != 0:
+        error = bounded_text(completed.stderr or completed.stdout or "Pi inference failed", 500)
+        raise RuntimeError(error)
+    write_status("thinking", model=model_id, endpoint=config["runtime"]["endpoint"], contextWindow=context_window)
+    return parse_model_json(completed.stdout)
+
+
+def focus_assistant_window(title: str) -> None:
+    hyprctl = command_argv("LOCAL_AI_ASSISTANT_HYPRCTL", "hyprctl")
+    for _ in range(120):
+        completed = subprocess.run(
+            [*hyprctl, "-j", "clients"],
+            env=hyprland_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        try:
+            clients = json.loads(completed.stdout or "[]") if completed.returncode == 0 else []
+        except json.JSONDecodeError:
+            clients = []
+        client = next(
+            (
+                value for value in clients
+                if isinstance(value, dict) and value.get("title") == title
+            ),
+            None,
+        ) if isinstance(clients, list) else None
+        if client:
+            address = str(client.get("address", ""))
+            selector = f"address:{address}" if address else f"title:^{re.escape(title)}$"
+            focused = subprocess.run(
+                [
+                    *hyprctl,
+                    "dispatch",
+                    f'hl.dsp.focus({{ window = "{selector}" }})',
+                ],
+                env=hyprland_environment(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2,
+            )
+            if focused.returncode != 0:
+                # Hyprland <= 0.54 used the legacy dispatcher arguments.
+                focused = subprocess.run(
+                    [*hyprctl, "dispatch", "focuswindow", selector],
+                    env=hyprland_environment(),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=2,
+                )
+            if focused.returncode != 0:
+                raise RuntimeError(focused.stderr.strip() or f"could not focus {title}")
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"{title} did not open")
+
+
+def voxtype_state_path() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(os.environ.get("LOCAL_AI_ASSISTANT_VOXTYPE_STATE", f"{runtime_dir}/voxtype/state"))
+
+
+def voxtype_state() -> str:
+    try:
+        return voxtype_state_path().read_text(encoding="utf-8").strip().casefold()
+    except OSError:
+        return "idle"
+
+
+def run_voxtype(*args: str) -> None:
+    completed = subprocess.run(
+        [*command_argv("LOCAL_AI_ASSISTANT_VOXTYPE", "voxtype"), "record", *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(bounded_text(completed.stderr or completed.stdout or "Voxtype failed", 300))
+
+
+def is_voxtype_osd_pid(pid: int) -> bool:
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
+    except OSError:
+        return False
+    return Path(os.fsdecode(command)).name == "voxtype-osd-gtk4"
+
+
+def voxtype_osd_pids() -> list[int]:
+    override = os.environ.get("LOCAL_AI_ASSISTANT_VOXTYPE_OSD_PIDS")
+    if override is not None:
+        return [int(value) for value in override.split(",") if value.strip().isdigit()]
+    result: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and is_voxtype_osd_pid(int(entry.name)):
+            result.append(int(entry.name))
+    return result
+
+
+def pause_voxtype_osd() -> list[int]:
+    paused: list[int] = []
+    for pid in voxtype_osd_pids():
+        try:
+            os.kill(pid, signal.SIGSTOP)
+            paused.append(pid)
+        except (OSError, ProcessLookupError):
+            continue
+    return paused
+
+
+def resume_voxtype_osd(pids: list[int]) -> None:
+    for pid in pids:
+        if not is_voxtype_osd_pid(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except (OSError, ProcessLookupError):
+            continue
+
+
+@contextmanager
+def locked_voice_control():
+    ensure_private_dir(VOICE_LOCK_FILE.parent)
+    with VOICE_LOCK_FILE.open("a+", encoding="utf-8") as handle:
+        VOICE_LOCK_FILE.chmod(0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def voice_start(config: dict[str, dict[str, Any]]) -> None:
+    with locked_voice_control():
+        _voice_start(config)
+
+
+def _voice_start(config: dict[str, dict[str, Any]]) -> None:
+    existing = read_json(VOICE_CONTROL_FILE, {})
+    if existing.get("pressed") is True and existing.get("phase") in {"starting", "recording"}:
+        return
+    previous_osd_pids = [int(pid) for pid in existing.get("osdPids", []) if isinstance(pid, int)]
+    if previous_osd_pids:
+        if voxtype_state() == "recording":
+            try:
+                run_voxtype("cancel")
+            except RuntimeError:
+                pass
+        resume_voxtype_osd(previous_osd_pids)
+    session_id = str(uuid.uuid4())
+    transcript_file = STATE_DIR / f"voice-transcript-{session_id}.txt"
+    transcript_file.unlink(missing_ok=True)
+    started_at = int(time.time())
+    atomic_write_json(VOICE_CONTROL_FILE, {
+        "sessionId": session_id,
+        "pressed": True,
+        "startDone": False,
+        "phase": "starting",
+        "startedAt": started_at,
+        "osdPids": [],
+        "transcriptFile": str(transcript_file),
+    })
+    paused_osd_pids: list[int] = []
+    try:
+        show_voice_status(config)
+        control = read_json(VOICE_CONTROL_FILE, {})
+        if control.get("sessionId") != session_id or control.get("pressed") is not True:
+            atomic_write_json(VOICE_CONTROL_FILE, {
+                "sessionId": session_id,
+                "pressed": False,
+                "startDone": True,
+                "phase": "idle",
+                "startedAt": started_at,
+                "transcriptFile": str(transcript_file),
+            })
+            return
+        paused_osd_pids = pause_voxtype_osd()
+        control = read_json(VOICE_CONTROL_FILE, {})
+        if control.get("sessionId") != session_id or control.get("pressed") is not True:
+            resume_voxtype_osd(paused_osd_pids)
+            atomic_write_json(VOICE_CONTROL_FILE, {
+                "sessionId": session_id,
+                "pressed": False,
+                "startDone": True,
+                "phase": "idle",
+                "startedAt": started_at,
+                "osdPids": [],
+                "transcriptFile": str(transcript_file),
+            })
+            return
+        atomic_write_json(VOICE_CONTROL_FILE, {
+            "sessionId": session_id,
+            "pressed": True,
+            "startDone": False,
+            "phase": "starting",
+            "startedAt": started_at,
+            "osdPids": paused_osd_pids,
+            "transcriptFile": str(transcript_file),
+        })
+        run_voxtype("start", f"--file={transcript_file}", "--no-auto-submit")
+        control = read_json(VOICE_CONTROL_FILE, {})
+        atomic_write_json(VOICE_CONTROL_FILE, {
+            "sessionId": session_id,
+            "pressed": control.get("pressed") is True,
+            "startDone": True,
+            "phase": "recording",
+            "startedAt": started_at,
+            "osdPids": paused_osd_pids,
+            "transcriptFile": str(transcript_file),
+        })
+    except Exception:
+        resume_voxtype_osd(paused_osd_pids)
+        control = read_json(VOICE_CONTROL_FILE, {})
+        if control.get("sessionId") == session_id:
+            atomic_write_json(VOICE_CONTROL_FILE, {
+                "sessionId": session_id,
+                "pressed": False,
+                "startDone": True,
+                "phase": "idle",
+                "startedAt": started_at,
+                "osdPids": [],
+                "transcriptFile": str(transcript_file),
+            })
+        transcript_file.unlink(missing_ok=True)
+        raise
+
+
+def voice_stop(config: dict[str, dict[str, Any]]) -> None:
+    with locked_voice_control():
+        request = _voice_stop()
+    if request:
+        ask_assistant(config, request)
+
+
+def _voice_stop() -> str:
+    control = read_json(VOICE_CONTROL_FILE, {})
+    session_id = str(control.get("sessionId", ""))
+    if not session_id or control.get("phase") == "idle":
+        return ""
+    transcript_file = safe_voice_transcript_path(control)
+    if transcript_file is None:
+        raise RuntimeError("voice transcript path was invalid")
+    paused_osd_pids = [int(pid) for pid in control.get("osdPids", []) if isinstance(pid, int)]
+    atomic_write_json(VOICE_CONTROL_FILE, {**control, "pressed": False, "phase": "releasing"})
+    deadline = time.monotonic() + 70
+    stop_sent = False
+    saw_transcription = False
+    request = ""
+    try:
+        while time.monotonic() < deadline:
+            state = voxtype_state()
+            latest = read_json(VOICE_CONTROL_FILE, {})
+            if session_id and latest.get("sessionId") != session_id:
+                return ""
+            if not paused_osd_pids:
+                paused_osd_pids = [
+                    int(pid) for pid in latest.get("osdPids", []) if isinstance(pid, int)
+                ]
+            if state == "recording" and not stop_sent:
+                run_voxtype("stop")
+                stop_sent = True
+                saw_transcription = True
+            elif state in {"streaming", "transcribing"}:
+                saw_transcription = True
+            elif state == "idle":
+                if saw_transcription:
+                    for _ in range(20):
+                        try:
+                            request = bounded_text(transcript_file.read_text(encoding="utf-8"), 2000)
+                        except OSError:
+                            request = ""
+                        if request:
+                            break
+                        time.sleep(0.01)
+                    if not request:
+                        clear_suggestion()
+                    return request
+                if latest.get("startDone") is True:
+                    clear_suggestion()
+                    return ""
+            time.sleep(0.05)
+        raise RuntimeError("dictation did not finish")
+    finally:
+        resume_voxtype_osd(paused_osd_pids)
+        latest = read_json(VOICE_CONTROL_FILE, {})
+        if latest.get("sessionId") == session_id:
+            atomic_write_json(VOICE_CONTROL_FILE, {
+                **latest,
+                "pressed": False,
+                "startDone": True,
+                "phase": "idle",
+                "osdPids": [],
+            })
+        transcript_file.unlink(missing_ok=True)
+
+
+def safe_voice_transcript_path(control: dict[str, Any]) -> Path | None:
+    raw_path = str(control.get("transcriptFile", ""))
+    if not raw_path:
+        return None
+    state_dir = STATE_DIR.resolve()
+    candidate = Path(raw_path).resolve()
+    if candidate.parent != state_dir or not candidate.name.startswith("voice-transcript-"):
+        return None
+    return candidate
+
+
+def show_voice_status(config: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    try:
+        context = active_context(config)
+    except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError):
+        context = None
+    context = context or {"appId": "Desktop", "title": "", "workspace": ""}
+    now = int(time.time())
+    suggestion = {
+        "id": str(uuid.uuid4()),
+        "mode": "voice",
+        "title": "Listening",
+        "observation": observed_context_text(context),
+        "body": "",
+        "copyText": "",
+        "delegatePrompt": "",
+        "createdAt": now,
+        "expiresAt": now + int(config["observer"]["suggestion_ttl_sec"]),
+        "held": True,
+        "focusPending": False,
+        "awaitingInput": False,
+        "streaming": False,
+        "workingDirectory": suggestion_working_directory(),
+        "context": context,
+    }
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+    append_audit("voice-started", suggestion)
+    return suggestion
+
+
+def summon_assistant(config: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    try:
+        context = active_context(config)
+    except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError):
+        context = None
+    context = context or {"appId": "Desktop", "title": "", "workspace": ""}
+    now = int(time.time())
+    suggestion = {
+        "id": str(uuid.uuid4()),
+        "mode": "summon",
+        "title": "Ask Local AI",
+        "observation": observed_context_text(context),
+        "body": "",
+        "copyText": "",
+        "delegatePrompt": "",
+        "createdAt": now,
+        "expiresAt": now + int(config["observer"]["suggestion_ttl_sec"]),
+        "held": True,
+        "focusPending": True,
+        "awaitingInput": True,
+        "streaming": False,
+        "workingDirectory": suggestion_working_directory(),
+        "context": context,
+    }
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+    append_audit("summoned", suggestion)
+    focus_assistant_window("Local AI Suggestion")
+    current = read_json(SUGGESTION_FILE, {})
+    if isinstance(current, dict) and current.get("id") == suggestion["id"]:
+        current["focusPending"] = False
+        current["held"] = True
+        atomic_write_json(SUGGESTION_FILE, current)
+    return suggestion
+
+
+def mark_ask_failed(suggestion: dict[str, Any], *, direct: bool = False) -> None:
+    if not suggestion_is_current(str(suggestion.get("id", ""))):
+        return
+    if direct:
+        # Hold-to-talk has no editor to recover into. Keep the response surface
+        # closed when no answer was produced instead of showing an error card.
+        clear_suggestion()
+        return
+    suggestion.update({
+        "body": "I couldn't get a local response. Edit the request and try again.",
+        "awaitingInput": not direct,
+        "streaming": False,
+        "held": not direct,
+    })
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+
+
+def ask_assistant(config: dict[str, dict[str, Any]], request: str) -> str:
+    request = bounded_text(request, 2000)
+    if not request:
+        raise RuntimeError("write or dictate a request first")
+    suggestion = current_suggestion()
+    source_mode = suggestion.get("mode")
+    if source_mode not in {"summon", "voice"}:
+        raise RuntimeError("summon Local AI before asking a direct question")
+
+    direct = source_mode == "voice"
+    now = int(time.time())
+    suggestion.update({
+        # Voice mode is deliberately retained until the first model token so
+        # the floating response window does not appear while Pi is loading.
+        "mode": "voice" if direct else "summon",
+        "title": "Local AI",
+        "request": request,
+        "body": "" if direct else "Starting local model…",
+        "copyText": "",
+        "delegatePrompt": "",
+        "awaitingInput": False,
+        "streaming": True,
+        "held": not direct,
+        "expiresAt": now + int(config["observer"]["suggestion_ttl_sec"]),
+    })
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+    try:
+        command, environment, model_id, context_window = pi_invocation(
+            config,
+            SYSTEM_PROMPT_FILE.read_text(encoding="utf-8"),
+            {
+                "interaction_mode": "direct",
+                "request": request,
+                "active_window": suggestion.get("context") or {},
+            },
+        )
+    except Exception:
+        mark_ask_failed(suggestion, direct=direct)
+        raise
+    if not suggestion_is_current(str(suggestion["id"])):
+        return ""
+    write_status("thinking", model=model_id, endpoint=config["runtime"]["endpoint"], contextWindow=context_window)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=STATE_DIR,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+    except OSError:
+        mark_ask_failed(suggestion, direct=direct)
+        raise
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        mark_ask_failed(suggestion, direct=direct)
+        raise RuntimeError("Pi streaming pipes were unavailable")
+
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    decoders = {
+        "stdout": codecs.getincrementaldecoder("utf-8")("replace"),
+        "stderr": codecs.getincrementaldecoder("utf-8")("replace"),
+    }
+    output = ""
+    errors = ""
+    last_update = 0.0
+    deadline = time.monotonic() + max(60.0, float(config["observer"]["inference_timeout_sec"]))
+    try:
+        while selector.get_map():
+            if time.monotonic() >= deadline:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                mark_ask_failed(suggestion, direct=direct)
+                raise RuntimeError("local response timed out")
+            for key, _ in selector.select(timeout=0.08):
+                chunk = os.read(key.fd, 4096)
+                stream = str(key.data)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                decoded = decoders[stream].decode(chunk)
+                if stream == "stdout":
+                    output = (output + decoded)[:6000]
+                else:
+                    errors = (errors + decoded)[-2000:]
+            now = time.monotonic()
+            if output.strip() and now - last_update >= 0.08:
+                if not suggestion_is_current(str(suggestion["id"])):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    return ""
+                if direct and suggestion.get("mode") == "voice":
+                    suggestion["mode"] = "direct"
+                    suggestion["held"] = False
+                    suggestion["expiresAt"] = int(time.time()) + int(
+                        config["observer"]["suggestion_ttl_sec"]
+                    )
+                suggestion["body"] = output.strip()
+                atomic_write_json(SUGGESTION_FILE, suggestion)
+                last_update = now
+        output += decoders["stdout"].decode(b"", final=True)
+        errors += decoders["stderr"].decode(b"", final=True)
+        return_code = process.wait(timeout=2)
+    finally:
+        selector.close()
+
+    response = output.strip()
+    if not suggestion_is_current(str(suggestion["id"])):
+        return response
+    if return_code != 0 or not response:
+        mark_ask_failed(suggestion, direct=direct)
+        raise RuntimeError(bounded_text(errors or "Pi returned no response", 500))
+
+    now = int(time.time())
+    suggestion.update({
+        "mode": "direct" if direct else "summon",
+        "body": response[:6000],
+        "copyText": response[:6000],
+        "delegatePrompt": bounded_text(
+            f"Continue this request in the full agent harness: {request}\n\nLocal assistant response: {response}", 1000
+        ),
+        "awaitingInput": False,
+        "streaming": False,
+        "expiresAt": now + int(config["observer"]["suggestion_ttl_sec"]),
+    })
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+    append_audit("answered", suggestion)
+    write_status("suggesting", model=model_id, endpoint=config["runtime"]["endpoint"], contextWindow=context_window)
+    return response
+
+
+def evaluate_context(config: dict[str, dict[str, Any]], context: dict[str, str]) -> dict[str, Any] | None:
+    if not context_is_actionable(config, context):
+        clear_suggestion()
+        append_audit("skipped", None, reason="insufficient-context")
+        write_status("watching", endpoint=config["runtime"]["endpoint"])
+        return None
+    if suggestions_last_hour() >= int(config["observer"]["max_suggestions_per_hour"]):
+        write_status("watching", lastError="Hourly suggestion limit reached")
+        clear_suggestion()
+        return None
+    write_status("thinking", endpoint=config["runtime"]["endpoint"])
+    raw = run_pi(config, context)
+    suggestion = normalized_suggestion(raw, context, config)
+    if suggestion is None:
+        clear_suggestion()
+        append_audit("skipped", None, confidence=float(raw.get("confidence", 0) or 0))
+        write_status("watching", endpoint=config["runtime"]["endpoint"])
+        return None
+    atomic_write_json(SUGGESTION_FILE, suggestion)
+    append_audit("shown", suggestion, confidence=suggestion["confidence"])
+    write_status("suggesting", endpoint=config["runtime"]["endpoint"])
+    return suggestion
+
+
+def control_state() -> dict[str, Any]:
+    value = read_json(CONTROL_FILE, {"paused": False, "snoozedUntil": 0})
+    return value if isinstance(value, dict) else {"paused": False, "snoozedUntil": 0}
+
+
+def is_paused() -> bool:
+    control = control_state()
+    return bool(control.get("paused")) or int(control.get("snoozedUntil", 0) or 0) > int(time.time())
+
+
+def set_control(**changes: Any) -> None:
+    control = control_state()
+    control.update(changes)
+    atomic_write_json(CONTROL_FILE, control)
+
+
+def hypr_socket_path() -> Path | None:
+    context = hyprland_runtime_context()
+    if context is None:
+        return None
+    runtime_dir, signature = context
+    return Path(runtime_dir) / "hypr" / signature / ".socket2.sock"
+
+
+def connect_hypr_events() -> socket.socket | None:
+    path = hypr_socket_path()
+    if path is None or not path.exists():
+        return None
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(1)
+    try:
+        client.connect(str(path))
+    except OSError:
+        client.close()
+        return None
+    return client
+
+
+def expire_suggestion_if_needed() -> None:
+    suggestion = read_json(SUGGESTION_FILE, {})
+    if (
+        isinstance(suggestion, dict)
+        and suggestion
+        and not suggestion_is_held(suggestion)
+        and int(suggestion.get("expiresAt", 0) or 0) <= int(time.time())
+    ):
+        clear_suggestion()
+
+
+def run_daemon(config_path: Path) -> int:
+    config = load_config(config_path)
+    ensure_private_dir(STATE_DIR)
+    ensure_private_dir(PI_DIR)
+    if not SUGGESTION_FILE.exists():
+        clear_suggestion()
+    if not CONTROL_FILE.exists():
+        set_control(paused=False, snoozedUntil=0)
+
+    stopping = False
+
+    def stop_handler(_signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop_handler)
+    signal.signal(signal.SIGINT, stop_handler)
+    write_status("starting", endpoint=config["runtime"]["endpoint"])
+    try:
+        model_id, context_window = ensure_runtime(config)
+        write_status(
+            "paused" if is_paused() else "watching",
+            model=model_id,
+            endpoint=config["runtime"]["endpoint"],
+            contextWindow=context_window,
+        )
+    except Exception as error:
+        write_status("error", endpoint=config["runtime"]["endpoint"], lastError=bounded_text(error, 500))
+
+    event_socket = connect_hypr_events()
+    socket_buffer = b""
+    next_socket_retry = time.monotonic() + 5
+    next_poll = 0.0
+    pending_at = time.monotonic() + float(config["observer"]["debounce_sec"])
+    last_fingerprint = ""
+    evaluated_at: dict[str, float] = {}
+
+    while not stopping:
+        now = time.monotonic()
+        expire_suggestion_if_needed()
+        if event_socket is None and now >= next_socket_retry:
+            event_socket = connect_hypr_events()
+            next_socket_retry = now + 5
+
+        event_triggered = False
+        if event_socket is not None:
+            try:
+                chunk = event_socket.recv(8192)
+                if not chunk:
+                    event_socket.close()
+                    event_socket = None
+                else:
+                    socket_buffer += chunk
+                    lines = socket_buffer.split(b"\n")
+                    socket_buffer = lines.pop()
+                    event_triggered = any(
+                        line.startswith((b"activewindow>>", b"activewindowv2>>", b"workspace>>", b"workspacev2>>"))
+                        for line in lines
+                    )
+            except socket.timeout:
+                pass
+            except OSError:
+                event_socket.close()
+                event_socket = None
+
+        if now >= next_poll:
+            event_triggered = True
+            next_poll = now + float(config["observer"]["poll_interval_sec"])
+        if event_triggered:
+            pending_at = now + float(config["observer"]["debounce_sec"])
+
+        if pending_at and now >= pending_at:
+            pending_at = 0.0
+            if suggestion_is_active():
+                write_status("suggesting", endpoint=config["runtime"]["endpoint"])
+                time.sleep(0.1)
+                continue
+            if is_paused():
+                write_status("paused", endpoint=config["runtime"]["endpoint"])
+                time.sleep(0.1)
+                continue
+            try:
+                context = active_context(config)
+                if context is None:
+                    write_status("watching", endpoint=config["runtime"]["endpoint"])
+                    continue
+                fingerprint = context_fingerprint(context)
+                cooldown = float(config["observer"]["cooldown_sec"])
+                if fingerprint == last_fingerprint or now - evaluated_at.get(fingerprint, 0) < cooldown:
+                    write_status("watching", endpoint=config["runtime"]["endpoint"])
+                    continue
+                last_fingerprint = fingerprint
+                evaluated_at[fingerprint] = now
+                evaluate_context(config, context)
+            except Exception as error:
+                clear_suggestion()
+                append_audit("error", None, error=bounded_text(error, 300))
+                write_status("error", endpoint=config["runtime"]["endpoint"], lastError=bounded_text(error, 500))
+        time.sleep(0.05)
+
+    clear_suggestion()
+    write_status("stopped", endpoint=config["runtime"]["endpoint"])
+    return 0
+
+
+def unit_quote(value: str) -> str:
+    if "\n" in value or "\x00" in value:
+        raise ConfigError("systemd paths may not contain newlines")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+def service_unit(config_path: Path) -> str:
+    state_dir = str(STATE_DIR.resolve())
+    pi_dir = str(PI_DIR.resolve())
+    return f"""[Unit]
+Description=Local AI Omarchy Assistant
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart={unit_quote(str(Path(__file__).resolve()))} --config {unit_quote(str(config_path.resolve()))} run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={unit_quote(state_dir)} {unit_quote(pi_dir)}
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def install_service(config_path: Path) -> Path:
+    load_config(config_path)
+    ensure_private_dir(STATE_DIR)
+    ensure_private_dir(PI_DIR)
+    UNIT_DIR.mkdir(parents=True, exist_ok=True)
+    unit_path = UNIT_DIR / UNIT_NAME
+    unit_path.write_text(service_unit(config_path), encoding="utf-8")
+    unit_path.chmod(0o644)
+    result = systemctl("daemon-reload")
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "systemctl daemon-reload failed")
+    return unit_path
+
+
+def service_flag(action: str) -> bool:
+    return systemctl(action, "--quiet", UNIT_NAME).returncode == 0
+
+
+def status_payload(config_path: Path) -> dict[str, Any]:
+    try:
+        config = load_config(config_path)
+        configured = True
+        config_error = ""
+    except ConfigError as error:
+        config = load_config(config_path, require=False)
+        configured = False
+        config_error = str(error)
+    daemon = read_json(STATUS_FILE, {})
+    suggestion = read_json(SUGGESTION_FILE, {})
+    if not suggestion_is_active(suggestion):
+        suggestion = {}
+    available_harnesses = harness_options(config)
+    preferred_harness = resolved_preferred_harness(config)
+    active = service_flag("is-active")
+    enabled = service_flag("is-enabled")
+    state = "disabled"
+    if active:
+        state = str(daemon.get("state") or "starting")
+    elif enabled:
+        state = "waiting"
+    if is_paused() and active:
+        state = "paused"
+    return {
+        "configured": configured,
+        "configError": config_error,
+        "configFile": str(config_path),
+        "enabled": enabled,
+        "active": active,
+        "paused": is_paused(),
+        "state": state,
+        "model": str(daemon.get("model") or config["runtime"]["model"]),
+        "modelLabel": friendly_model_name(str(daemon.get("model") or config["runtime"]["model"])),
+        "endpoint": config["runtime"]["endpoint"],
+        "lastError": str(daemon.get("lastError") or config_error),
+        "suggestionFile": str(SUGGESTION_FILE),
+        "playbookFile": str(expand_path(config["playbook"]["path"])),
+        "memoryFile": str(MEMORY_FILE),
+        "delegateAvailable": bool(preferred_harness),
+        "preferredHarness": preferred_harness,
+        "preferredHarnessLabel": harness_label(config, preferred_harness) if preferred_harness else "",
+        "harnessChoices": available_harnesses,
+        "suggestion": suggestion,
+        "privacy": {
+            "windowTitle": bool(config["privacy"]["share_window_title"]),
+            "screenshots": False,
+            "denyRules": len(set([
+                *PROTECTED_DENY_APPS,
+                *config["privacy"]["deny_apps"],
+                *config["privacy"]["blocked_apps"],
+                *PROTECTED_DENY_TITLE_PATTERNS,
+                *config["privacy"]["deny_title_patterns"],
+            ])),
+        },
+    }
+
+
+def current_suggestion() -> dict[str, Any]:
+    value = read_json(SUGGESTION_FILE, {})
+    if not isinstance(value, dict) or not value.get("id"):
+        raise RuntimeError("there is no active suggestion")
+    return value
+
+
+def remember_suggestion(config: dict[str, dict[str, Any]], suggestion: dict[str, Any]) -> None:
+    path = expand_path(config["playbook"]["path"])
+    playbook = load_playbook(config)
+    context = suggestion.get("context") or {}
+    rule = {
+        "id": str(uuid.uuid4()),
+        "enabled": True,
+        "appId": bounded_text(context.get("appId"), 120),
+        "titleKeyword": "",
+        "hint": bounded_text(f"{suggestion.get('title', '')}: {suggestion.get('body', '')}", 300),
+        "createdAt": int(time.time()),
+    }
+    playbook["version"] = 1
+    playbook.setdefault("rules", []).append(rule)
+    atomic_write_json(path, playbook)
+
+
+def launch_editor(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        atomic_write_json(path, {"version": 1, "rules": []})
+    completed = subprocess.run(["omarchy", "launch", "config", "editor", str(path)])
+    if completed.returncode != 0:
+        raise RuntimeError("could not open editor")
+
+
+def open_memory() -> None:
+    path = sync_memory_file()
+    completed = subprocess.run(["omarchy", "launch", "config", "editor", str(path)])
+    if completed.returncode != 0:
+        raise RuntimeError("could not open learned memory")
+
+
+def open_settings(config_path: Path) -> None:
+    if not config_path.exists():
+        if not EXAMPLE_CONFIG_FILE.is_file():
+            raise RuntimeError(f"example settings not found: {EXAMPLE_CONFIG_FILE}")
+        ensure_private_dir(config_path.parent)
+        config_path.write_text(EXAMPLE_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+        config_path.chmod(0o600)
+    completed = subprocess.run(["omarchy", "launch", "config", "editor", str(config_path)])
+    if completed.returncode != 0:
+        raise RuntimeError("could not open editor")
+
+
+def doctor(config_path: Path, online: bool) -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+    try:
+        config = load_config(config_path)
+        checks["config"] = {"ok": True, "detail": str(config_path)}
+    except ConfigError as error:
+        return {"ok": False, "checks": {"config": {"ok": False, "detail": str(error)}}}
+    for label, env_name, fallback in (
+        ("pi", "LOCAL_AI_ASSISTANT_PI", "pi"),
+        ("hyprctl", "LOCAL_AI_ASSISTANT_HYPRCTL", "hyprctl"),
+        ("systemctl", "LOCAL_AI_ASSISTANT_SYSTEMCTL", "systemctl"),
+    ):
+        executable = command_argv(env_name, fallback)[0]
+        available = shutil.which(executable) is not None or Path(executable).is_file()
+        checks[label] = {"ok": available, "detail": executable}
+    checks["systemPrompt"] = {"ok": SYSTEM_PROMPT_FILE.is_file(), "detail": str(SYSTEM_PROMPT_FILE)}
+    if online:
+        try:
+            model_id, context = sync_pi_catalog(config)
+            checks["runtime"] = {"ok": True, "detail": f"{model_id} · {context} tokens"}
+        except Exception as error:
+            checks["runtime"] = {"ok": False, "detail": bounded_text(error, 500)}
+    return {"ok": all(check["ok"] for check in checks.values()), "checks": checks}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path(os.environ.get("LOCAL_AI_ASSISTANT_CONFIG", DEFAULT_CONFIG)))
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("status")
+    subparsers.add_parser("setup-state")
+    subparsers.add_parser("apps")
+    configure_parser = subparsers.add_parser("configure")
+    configure_parser.add_argument("model_choice")
+    configure_parser.add_argument("minimum_confidence")
+    configure_parser.add_argument("share_window_title")
+    configure_parser.add_argument("blocked_apps", nargs="?", default="[]")
+    configure_parser.add_argument("preferred_harness", nargs="?", default="")
+    doctor_parser = subparsers.add_parser("doctor")
+    doctor_parser.add_argument("--online", action="store_true")
+    subparsers.add_parser("render-service")
+    subparsers.add_parser("install-service")
+    subparsers.add_parser("enable")
+    subparsers.add_parser("disable")
+    subparsers.add_parser("restart")
+    subparsers.add_parser("pause")
+    subparsers.add_parser("resume")
+    subparsers.add_parser("dismiss")
+    subparsers.add_parser("clear-feedback")
+    subparsers.add_parser("open-memory")
+    subparsers.add_parser("copy")
+    subparsers.add_parser("remember")
+    subparsers.add_parser("hold-suggestion")
+    subparsers.add_parser("release-suggestion")
+    subparsers.add_parser("prepare-window")
+    subparsers.add_parser("place-window")
+    subparsers.add_parser("summon")
+    subparsers.add_parser("voice-start")
+    subparsers.add_parser("voice-stop")
+    ask_parser = subparsers.add_parser("ask")
+    ask_parser.add_argument("request")
+    delegate_parser = subparsers.add_parser("delegate")
+    delegate_parser.add_argument("harness", nargs="?", default="")
+    subparsers.add_parser("edit-settings")
+    subparsers.add_parser("open-playbook")
+    subparsers.add_parser("test-suggestion")
+    evaluate_parser = subparsers.add_parser("evaluate")
+    evaluate_parser.add_argument("--context-json", required=True)
+    subparsers.add_parser("run")
+    args = parser.parse_args()
+    config_path = args.config.expanduser().resolve()
+
+    try:
+        if args.command == "status":
+            print(json.dumps(status_payload(config_path), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "setup-state":
+            print(json.dumps(setup_payload(config_path), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "apps":
+            print(json.dumps(installed_app_options(), ensure_ascii=False))
+        elif args.command == "configure":
+            configure_from_ui(
+                config_path,
+                args.model_choice,
+                args.minimum_confidence,
+                args.share_window_title,
+                args.blocked_apps,
+                args.preferred_harness,
+            )
+            print("configured")
+        elif args.command == "doctor":
+            result = doctor(config_path, args.online)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["ok"] else 1
+        elif args.command == "render-service":
+            load_config(config_path)
+            print(service_unit(config_path), end="")
+        elif args.command == "install-service":
+            print(install_service(config_path))
+        elif args.command == "enable":
+            install_service(config_path)
+            result = systemctl("enable", "--now", UNIT_NAME)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "could not enable Assistant service")
+            print("enabled")
+        elif args.command == "disable":
+            result = systemctl("disable", "--now", UNIT_NAME)
+            if result.returncode != 0 and "does not exist" not in result.stderr:
+                raise RuntimeError(result.stderr.strip() or "could not disable Assistant service")
+            clear_suggestion()
+            write_status("stopped")
+            print("disabled")
+        elif args.command == "restart":
+            result = systemctl("restart", UNIT_NAME)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "could not restart Assistant service")
+            print("restarted")
+        elif args.command == "pause":
+            set_control(paused=True)
+            clear_suggestion()
+            write_status("paused")
+            print("paused")
+        elif args.command == "resume":
+            set_control(paused=False, snoozedUntil=0)
+            write_status("watching")
+            print("resumed")
+        elif args.command == "dismiss":
+            suggestion = current_suggestion()
+            remember_dismissed_suggestion(suggestion)
+            append_audit("dismissed", suggestion)
+            clear_suggestion()
+            print("dismissed")
+        elif args.command == "clear-feedback":
+            atomic_write_json(FEEDBACK_FILE, {"version": 1, "examples": []})
+            sync_memory_file()
+            print("feedback cleared")
+        elif args.command == "open-memory":
+            open_memory()
+            print(str(MEMORY_FILE))
+        elif args.command == "copy":
+            suggestion = current_suggestion()
+            completed = subprocess.run(["wl-copy"], input=str(suggestion.get("copyText") or suggestion.get("body") or ""), text=True)
+            if completed.returncode != 0:
+                raise RuntimeError("wl-copy failed")
+            append_audit("copied", suggestion)
+            print("copied")
+        elif args.command == "remember":
+            config = load_config(config_path)
+            suggestion = current_suggestion()
+            remember_suggestion(config, suggestion)
+            append_audit("remembered", suggestion)
+            clear_suggestion()
+            print("remembered")
+        elif args.command == "hold-suggestion":
+            config = load_config(config_path)
+            set_suggestion_held(config, True)
+            print("held")
+        elif args.command == "release-suggestion":
+            config = load_config(config_path)
+            set_suggestion_held(config, False)
+            print("released")
+        elif args.command == "prepare-window":
+            prepare_suggestion_window()
+            print("prepared")
+        elif args.command == "place-window":
+            place_suggestion_window()
+            print("placed")
+        elif args.command == "summon":
+            config = load_config(config_path)
+            summon_assistant(config)
+            print("summoned")
+        elif args.command == "voice-start":
+            config = load_config(config_path)
+            voice_start(config)
+            print("listening")
+        elif args.command == "voice-stop":
+            config = load_config(config_path)
+            voice_stop(config)
+            print("submitted")
+        elif args.command == "ask":
+            config = load_config(config_path)
+            ask_assistant(config, args.request)
+            print("answered")
+        elif args.command == "delegate":
+            config = load_config(config_path)
+            suggestion = current_suggestion()
+            harness = args.harness or resolved_preferred_harness(config)
+            if not harness:
+                raise RuntimeError("choose an installed preferred harness in Settings")
+            handoff_path = create_handoff_session(suggestion, harness)
+            copy_handoff_path(handoff_path)
+            launch_handoff(config, harness, handoff_path, suggestion)
+            append_audit("delegated", suggestion, harness=harness, handoffPath=str(handoff_path))
+            clear_suggestion()
+            print(str(handoff_path))
+        elif args.command == "edit-settings":
+            open_settings(config_path)
+        elif args.command == "open-playbook":
+            config = load_config(config_path)
+            launch_editor(expand_path(config["playbook"]["path"]))
+        elif args.command == "test-suggestion":
+            config = load_config(config_path)
+            now = int(time.time())
+            suggestion = {
+                "id": str(uuid.uuid4()),
+                "mode": "proactive",
+                "title": "A useful next step",
+                "observation": "Demo: You asked Local AI to show a suggestion card.",
+                "body": "Try a quick action, or continue in your preferred harness.",
+                "copyText": "Local AI's always-on assistant is ready for testing.",
+                "delegatePrompt": "Review the Local AI always-on assistant setup and report any issues. Do not edit files.",
+                "confidence": 1.0,
+                "createdAt": now,
+                "expiresAt": now + int(config["observer"]["suggestion_ttl_sec"]),
+                "workingDirectory": suggestion_working_directory(),
+                "context": {"appId": "Local AI", "title": "Suggestion card demo", "workspace": ""},
+            }
+            atomic_write_json(SUGGESTION_FILE, suggestion)
+            append_audit("shown", suggestion, test=True)
+            print("shown")
+        elif args.command == "evaluate":
+            config = load_config(config_path)
+            context = json.loads(args.context_json)
+            if not isinstance(context, dict):
+                raise RuntimeError("context must be a JSON object")
+            result = evaluate_context(config, {key: bounded_text(context.get(key), 200) for key in ("appId", "title", "workspace")})
+            print(json.dumps(result or {}, ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "run":
+            return run_daemon(config_path)
+    except (ConfigError, RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError, urllib.error.URLError) as error:
+        print(f"local-ai-assistant: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

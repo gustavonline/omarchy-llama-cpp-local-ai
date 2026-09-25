@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n ${LOCAL_AI_ASSISTANT_FAKE_PI_ARGV_LOG:-} ]]; then
+  printf '%s\n' "$*" >>"$LOCAL_AI_ASSISTANT_FAKE_PI_ARGV_LOG"
+fi
+if [[ $* == *'"interaction_mode":"direct"'* ]]; then
+  printf 'Streaming local '
+  sleep 0.05
+  printf 'response.'
+  exit 0
+fi
 printf '%s\n' '{"show":true,"title":"Prepare the next step","body":"A bounded local suggestion from the fake Pi runtime.","copy_text":"Draft text","delegate_prompt":"Review this task without editing files.","confidence":0.91,"reason":"test"}'
-

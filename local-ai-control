@@ -38,12 +38,14 @@ with open(sys.argv[1], "rb") as handle:
 profiles = config.get("profiles", [])
 if not isinstance(profiles, list):
     raise SystemExit("profiles must be an array of tables")
-unknown_top = sorted(set(config).difference({"default", "profiles"}))
+unknown_top = sorted(set(config).difference({"default", "profiles", "assistant"}))
 if unknown_top:
     raise SystemExit(
         "unknown top-level field(s): " + ", ".join(unknown_top) +
         "; runtime settings are discovered from each service"
     )
+if "assistant" in config and not isinstance(config["assistant"], dict):
+    raise SystemExit("assistant must be a table")
 names = []
 if "default" in config and not isinstance(config["default"], str):
     raise SystemExit("default must be a profile name string")
@@ -142,7 +144,10 @@ if model_path:
     stem = Path(model_path).name
     if stem.lower().endswith(".gguf"):
         stem = stem[:-5]
-    variant_match = re.search(r"(?:^|-)(Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32)$", stem, re.I)
+    stem = re.sub(r"-\d{5}-of-\d{5}$", "", stem, flags=re.I)
+    variant_match = re.search(
+        r"(?:^|-)((?:UD-)?(?:I?Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32))$", stem, re.I
+    )
     if variant_match:
         variant = variant_match.group(1)
         stem = stem[:variant_match.start()].rstrip("-")
@@ -199,7 +204,7 @@ status_json() {
   local profiles='[]' active_id="stopped" state="inactive" label="Stopped" detail=""
   local active_model="" active_variant="" active_context=""
   local active_backend="" active_endpoint=""
-  local encoded profile runtime id profile_label model variant context backend endpoint description unit ready unit_state
+  local encoded profile runtime id profile_label model variant context backend endpoint description unit unit_file ready unit_state
 
   while IFS= read -r encoded; do
     [[ -n $encoded ]] || continue
@@ -207,6 +212,8 @@ status_json() {
     id=$(jq -r '.name' <<<"$profile")
     profile_label="$id"
     unit=$(jq -r '.service' <<<"$profile")
+    unit_file="$HOME/.config/systemd/user/$unit"
+    [[ -f $unit_file ]] || unit_file=""
     runtime=$(inspect_unit "$unit")
     model=$(jq -r '.model // ""' <<<"$runtime")
     variant=$(jq -r '.variant // ""' <<<"$runtime")
@@ -225,9 +232,9 @@ status_json() {
       --argjson list "$profiles" --arg id "$id" --arg label "$profile_label" \
       --arg model "$model" --arg variant "$variant" --arg context "$context" \
       --arg backend "$backend" --arg endpoint "$endpoint" \
-      --arg description "$description" --arg unit "$unit" --arg state "$unit_state" \
+      --arg description "$description" --arg unit "$unit" --arg unitFile "$unit_file" --arg state "$unit_state" \
       --argjson ready "$ready" \
-      '$list + [{id:$id,label:$label,model:$model,variant:$variant,context:$context,backend:$backend,endpoint:$endpoint,description:$description,unit:$unit,state:$state,ready:$ready}]')
+      '$list + [{id:$id,label:$label,model:$model,variant:$variant,context:$context,backend:$backend,endpoint:$endpoint,description:$description,unit:$unit,unitFile:$unitFile,state:$state,ready:$ready}]')
 
     if [[ $unit_state == active ]]; then
       active_id="$id"; state="active"; label="$profile_label"; detail="$description"
@@ -280,6 +287,117 @@ start_profile() {
   systemctl --user start -- "$unit"
 }
 
+rename_profiles() {
+  local payload="${1:-}"
+  [[ -n $payload ]] || { printf 'Runtime name payload is required\n' >&2; exit 2; }
+  python3 - "$config_file" "$payload" <<'PY'
+import json
+import os
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    requested = json.loads(sys.argv[2])
+except json.JSONDecodeError as error:
+    raise SystemExit(f"invalid runtime name payload: {error}")
+if not isinstance(requested, list):
+    raise SystemExit("runtime name payload must be a list")
+
+with path.open("rb") as handle:
+    config = tomllib.load(handle)
+profiles = config.get("profiles", [])
+if not isinstance(profiles, list):
+    raise SystemExit("profiles must be an array of tables")
+
+mapping = {}
+for item in requested:
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str) \
+            or not isinstance(item.get("name"), str):
+        raise SystemExit("every runtime name needs string id and name fields")
+    old_name = item["id"]
+    new_name = item["name"].strip()
+    if not new_name:
+        raise SystemExit("runtime names cannot be empty")
+    if len(new_name) > 64 or "\n" in new_name or "\r" in new_name:
+        raise SystemExit("runtime names must be one line and at most 64 characters")
+    if old_name in mapping:
+        raise SystemExit(f"runtime profile appears more than once: {old_name}")
+    mapping[old_name] = new_name
+
+current_names = [profile.get("name") for profile in profiles]
+if set(mapping) != set(current_names) or len(mapping) != len(current_names):
+    raise SystemExit("runtime profiles changed; reopen Local AI and try again")
+new_names = list(mapping.values())
+if len(new_names) != len(set(new_names)):
+    raise SystemExit("runtime names must be unique")
+
+old_default = config.get("default", "")
+config["default"] = mapping.get(old_default, old_default)
+for profile in profiles:
+    profile["name"] = mapping[profile["name"]]
+
+def quoted(value):
+    return json.dumps(value, ensure_ascii=False)
+
+lines = [
+    "# Local AI runtime profiles. Names are user-facing and editable in the panel.",
+    "# Model, quantization, context, and endpoint are discovered from each service.",
+    f"default = {quoted(config.get('default', ''))}",
+    "",
+]
+for profile in profiles:
+    lines.extend([
+        "[[profiles]]",
+        f"name = {quoted(profile['name'])}",
+        f"service = {quoted(profile['service'])}",
+    ])
+    for optional in ("summary", "endpoint"):
+        if optional in profile:
+            lines.append(f"{optional} = {quoted(profile[optional])}")
+    lines.append("")
+
+assistant = config.get("assistant", {})
+if assistant:
+    if not isinstance(assistant, dict):
+        raise SystemExit("assistant must be a table")
+
+    def toml_value(value):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        if isinstance(value, str):
+            return quoted(value)
+        if isinstance(value, list):
+            return "[" + ", ".join(toml_value(item) for item in value) + "]"
+        raise SystemExit(f"unsupported Assistant config value: {type(value).__name__}")
+
+    for table, values in assistant.items():
+        if not isinstance(values, dict):
+            raise SystemExit(f"assistant.{table} must be a table")
+        lines.append(f"[assistant.{table}]")
+        for key, value in values.items():
+            lines.append(f"{key} = {toml_value(value)}")
+        lines.append("")
+
+mode = path.stat().st_mode & 0o777
+fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+}
+
 doctor() {
   local status bad count
   status=$(status_json)
@@ -301,6 +419,7 @@ case "${1:-status}" in
   status) status_json ;;
   doctor) doctor ;;
   start) start_profile "${2:-}" ;;
+  rename-profiles) rename_profiles "${2:-}" ;;
   restart)
     if unit=$(active_unit); then systemctl --user restart -- "$unit"; else start_profile ""; fi
     ;;
@@ -308,7 +427,7 @@ case "${1:-status}" in
     while IFS= read -r unit; do systemctl --user disable --now -- "$unit"; done < <(all_units)
     ;;
   *)
-    printf 'Usage: %s [--config PATH] {status|doctor|start [PROFILE]|restart|stop}\n' "${0##*/}" >&2
+    printf 'Usage: %s [--config PATH] {status|doctor|start [PROFILE]|rename-profiles JSON|restart|stop}\n' "${0##*/}" >&2
     exit 2
     ;;
 esac

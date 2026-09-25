@@ -3,8 +3,8 @@
 Use this workflow when installing the plugin or adding a model. Keep the runtime
 architecture to three layers:
 
-1. A GGUF model and any matching draft model.
-2. One tested systemd **user** service containing the llama-server command.
+1. A GGUF model, with its downloaded filename unchanged, and any matching draft model.
+2. One model-agnostic systemd **user** runtime slot containing the llama-server command.
 3. One `name`/`service` entry in `~/.config/omarchy/local-ai.toml`.
 
 ## Add or change a profile
@@ -14,11 +14,15 @@ architecture to three layers:
 2. Choose launch arguments appropriate for that machine and model. Do not copy
    another model's context, cache, GPU, or speculative-decoding settings without
    verifying compatibility.
-3. Create one user service per useful launch profile. Services sharing an
-   endpoint or accelerator should conflict with each other.
+3. Create one model-agnostic runtime slot per actual model, for example
+   `omarchy-local-ai-runtime-1.service`. Put that model's context, cache, GPU,
+   and optional draft settings in its `ExecStart`. Do not create separate Local
+   AI profiles merely for Q4/Q8/BF16 variants of the same model.
 4. Run `systemctl --user daemon-reload`, start the new service directly, wait
    for the API to become ready, make a small inference request, then stop it.
-5. Add only its friendly name and unit name to `local-ai.toml`.
+5. Add only its friendly name and unit name to `local-ai.toml`. Change friendly
+   display names, add/remove profiles, and change services in the advanced runtime
+   config opened from the Local AI panel.
 6. Run `local-ai-control doctor` and `test.sh`.
 7. Leave the service disabled. The panel must start it only on demand.
 
@@ -30,8 +34,8 @@ machine:
 
 ```ini
 [Unit]
-Description=Local llama.cpp profile
-Conflicts=local-ai-other.service
+Description=Local AI llama.cpp runtime slot 1
+Conflicts=omarchy-local-ai-runtime-2.service omarchy-local-ai-runtime-3.service
 
 [Service]
 Type=simple
@@ -74,10 +78,12 @@ runtime profile and not another Omarchy plugin. Configure it from the
    `runtime.start_command` argv that invokes `local-ai-control start PROFILE`.
 5. Keep screenshots disabled. Adjust privacy deny rules before widening shared
    window metadata.
-6. Optionally keep a fixed argv for custom handoffs or Pi Worker flags. Every
-   detected harness is launched in a visible terminal after an explicit click;
-   it is never a tool granted to the light model.
-7. Run `local-ai-copilot doctor --online`, then enable the assistant and use the
+6. Optionally keep a fixed argv for custom handoffs or Pi Worker flags. An
+   explicit Continue click creates a private harness-neutral session, copies
+   its `SESSION.md` path, and opens the selected harness. Codex uses its desktop
+   app when installed; CLI harnesses receive the bare session path as their
+   final argument. The harness is never a tool granted to the light model.
+7. Run `local-ai-assistant doctor --online`, then enable the assistant and use the
    real-work acceptance guide.
 
 The assistant systemd service owns only its observer, state, isolated Pi catalog,

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_file=${LOCAL_AI_ASSISTANT_VOXTYPE_STATE:?}
+log_file=${LOCAL_AI_ASSISTANT_VOXTYPE_LOG:?}
+output_path_file="${state_file}.output-path"
+mkdir -p -- "$(dirname -- "$state_file")"
+printf '%s\n' "$*" >>"$log_file"
+
+case " $* " in
+  *" record start "*)
+    output_path=""
+    for argument in "$@"; do
+      case "$argument" in
+        --file=*) output_path=${argument#--file=} ;;
+      esac
+    done
+    [[ -n $output_path ]] || {
+      printf 'fake Voxtype expected --file=PATH\n' >&2
+      exit 2
+    }
+    printf '%s\n' "$output_path" >"$output_path_file"
+    printf 'recording\n' >"$state_file"
+    ;;
+  *" record stop "*)
+    [[ -s $output_path_file ]] || {
+      printf 'fake Voxtype has no output path\n' >&2
+      exit 2
+    }
+    output_path=$(<"$output_path_file")
+    printf 'transcribing\n' >"$state_file"
+    (
+      sleep 0.05
+      printf '%s\n' "${LOCAL_AI_ASSISTANT_FAKE_TRANSCRIPT:-Summarize the next step}" >"$output_path"
+      printf 'idle\n' >"$state_file"
+    ) &
+    ;;
+  *)
+    printf 'unexpected fake Voxtype command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
